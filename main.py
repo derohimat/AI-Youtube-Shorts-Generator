@@ -1,188 +1,71 @@
-from Components.YoutubeDownloader import download_youtube_video
-from Components.Edit import extractAudio, crop_video
-from Components.Transcription import transcribeAudio
-from Components.LanguageTasks import GetHighlight
-from Components.FaceCrop import crop_to_vertical, combine_videos
-from Components.Subtitles import add_subtitles_to_video
+"""Command-line interface. For the point-and-click web UI run: python app.py
+
+Examples:
+    python main.py "https://youtu.be/VIDEO_ID"
+    python main.py video.mp4 --clips 3 --max 45 --style clean-white --auto-approve
+    xargs -a urls.txt -I{} python main.py --auto-approve {}
+"""
+import argparse
 import sys
-import os
-import uuid
-import re
 
-# Generate unique session ID for this run (for concurrent execution support)
-session_id = str(uuid.uuid4())[:8]
-print(f"Session ID: {session_id}")
+from Components import pipeline
+from Components.captions import DEFAULT_PRESET, PRESETS
+from Components.framing import MODES
+from Components.highlights import PROVIDERS
 
-# Check for auto-approve flag (for batch processing)
-auto_approve = "--auto-approve" in sys.argv
-if auto_approve:
-    sys.argv.remove("--auto-approve")
 
-# Check if URL/file was provided as command-line argument
-if len(sys.argv) > 1:
-    url_or_file = sys.argv[1]
-    print(f"Using input from command line: {url_or_file}")
-else:
-    url_or_file = input("Enter YouTube video URL or local video file path: ")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Turn a long video into vertical shorts.")
+    parser.add_argument("source", nargs="?", help="YouTube URL or local video file")
+    parser.add_argument("--clips", type=int, default=3, help="number of clips to find (default 3)")
+    parser.add_argument("--min", dest="min_len", type=int, default=20, help="minimum clip length in seconds")
+    parser.add_argument("--max", dest="max_len", type=int, default=60, help="maximum clip length in seconds")
+    parser.add_argument("--style", default=DEFAULT_PRESET, choices=list(PRESETS), help="caption style")
+    parser.add_argument("--framing", default="auto", choices=MODES, help="how to fit the video in 9:16")
+    parser.add_argument("--provider", choices=PROVIDERS, help="LLM provider (default from .env)")
+    parser.add_argument("--model", help="LLM model name (default per provider)")
+    parser.add_argument("--language", help="spoken language code, e.g. en, id, es (default: auto-detect)")
+    parser.add_argument("--instructions", default="", help='what to look for, e.g. "funny moments"')
+    parser.add_argument("--no-loudnorm", action="store_true", help="keep the original audio loudness")
+    parser.add_argument("--auto-approve", action="store_true", help="render all found clips without asking")
+    return parser.parse_args(argv)
 
-# Check if input is a local file
-video_title = None
-if os.path.isfile(url_or_file):
-    print(f"Using local video file: {url_or_file}")
-    Vid = url_or_file
-    # Extract title from filename
-    video_title = os.path.splitext(os.path.basename(url_or_file))[0]
-else:
-    # Assume it's a YouTube URL
-    print(f"Downloading from YouTube: {url_or_file}")
-    Vid = download_youtube_video(url_or_file)
-    if Vid:
-        Vid = Vid.replace(".webm", ".mp4")
-        print(f"Downloaded video and audio files successfully! at {Vid}")
-        # Extract title from downloaded file path
-        video_title = os.path.splitext(os.path.basename(Vid))[0]
 
-# Clean and slugify title for filename
-def clean_filename(title):
-    # Convert to lowercase
-    cleaned = title.lower()
-    # Remove or replace invalid filename characters
-    cleaned = re.sub(r'[<>:"/\\|?*\[\]]', '', cleaned)
-    # Replace spaces and underscores with hyphens
-    cleaned = re.sub(r'[\s_]+', '-', cleaned)
-    # Remove multiple consecutive hyphens
-    cleaned = re.sub(r'-+', '-', cleaned)
-    # Remove leading/trailing hyphens
-    cleaned = cleaned.strip('-')
-    # Limit length
-    return cleaned[:80]
+def choose_clips(clips):
+    print("\nSuggested clips:")
+    for clip in clips:
+        print(f"  [{clip['id']}] {pipeline.format_time(clip['start'])}-{pipeline.format_time(clip['end'])} "
+              f"({clip['end'] - clip['start']:.0f}s) score {clip['score']}/10  {clip['title']}")
+        if clip.get("reason"):
+            print(f"       {clip['reason']}")
+    answer = input("\nClip numbers to render (e.g. 1,3), Enter = all, q = quit: ").strip().lower()
+    if answer == "q":
+        sys.exit(0)
+    if not answer:
+        return clips
+    wanted = {int(x) for x in answer.replace(" ", ",").split(",") if x.isdigit()}
+    return [c for c in clips if c["id"] in wanted]
 
-# Process video (works for both local files and downloaded videos)
-if Vid:
-    # Create unique temporary filenames
-    audio_file = f"audio_{session_id}.wav"
-    temp_clip = f"temp_clip_{session_id}.mp4"
-    temp_cropped = f"temp_cropped_{session_id}.mp4"
-    temp_subtitled = f"temp_subtitled_{session_id}.mp4"
-    
-    Audio = extractAudio(Vid, audio_file)
-    if Audio:
 
-        transcriptions = transcribeAudio(Audio)
-        if len(transcriptions) > 0:
-            print(f"\n{'='*60}")
-            print(f"TRANSCRIPTION SUMMARY: {len(transcriptions)} segments")
-            print(f"{'='*60}\n")
-            TransText = ""
+def main(argv=None):
+    args = parse_args(argv)
+    source = args.source or input("Enter YouTube video URL or local video file path: ")
 
-            for text, start, end in transcriptions:
-                TransText += (f"{start} - {end}: {text}\n")
+    project = pipeline.prepare(source, language=args.language)
+    clips = pipeline.suggest_clips(project, args.clips, args.min_len, args.max_len, args.instructions,
+                                   provider=args.provider, model=args.model)
+    if not clips:
+        print("No suitable clips found.")
+        return 1
+    if not args.auto_approve:
+        clips = choose_clips(clips)
 
-            print("Analyzing transcription to find best highlight...")
-            start , stop = GetHighlight(TransText)
-            
-            # Check if GetHighlight failed
-            if start is None or stop is None:
-                print(f"\n{'='*60}")
-                print("ERROR: Failed to get highlight from LLM")
-                print(f"{'='*60}")
-                print("This could be due to:")
-                print("  - OpenAI API issues or rate limiting")
-                print("  - Invalid API key")
-                print("  - Network connectivity problems")
-                print("  - Malformed transcription data")
-                print(f"\nTranscription summary:")
-                print(f"  Total segments: {len(transcriptions)}")
-                print(f"  Total length: {len(TransText)} characters")
-                print(f"{'='*60}\n")
-                sys.exit(1) # Exit gracefully
-            
-            # Interactive approval loop with timeout (skip if auto-approve)
-            import select
-            
-            approved = auto_approve  # Auto-approve if flag is set
-            
-            if not auto_approve:
-                while not approved:
-                    print(f"\n{'='*60}")
-                    print(f"SELECTED SEGMENT DETAILS:")
-                    print(f"Time: {start}s - {stop}s ({stop-start}s duration)")
-                    print(f"{'='*60}\n")
-                    
-                    print("Options:")
-                    print("  [Enter/y] Approve and continue")
-                    print("  [r] Regenerate selection")
-                    print("  [n] Cancel")
-                    print("\nAuto-approving in 15 seconds if no input...")
-                    
-                    regenerate = False
-                    
-                    try:
-                        # Check if stdin is ready within 15 seconds
-                        ready, _, _ = select.select([sys.stdin], [], [], 15)
-                        if ready:
-                            user_input = sys.stdin.readline().strip().lower()
-                            if user_input == 'r':
-                                print("\nRegenerating selection...")
-                                start, stop = GetHighlight(TransText)
-                                regenerate = True
-                            elif user_input == 'n':
-                                print("Cancelled by user")
-                                sys.exit(0)
-                            else:
-                                print("Approved by user")
-                                approved = True
-                        else:
-                            print("\nTimeout - auto-approving selection")
-                            approved = True
-                    except:
-                        # Fallback if select doesn't work (e.g., Windows)
-                        print("\nAuto-approving (timeout not available on this platform)")
-                        approved = True
-            else:
-                print(f"\n{'='*60}")
-                print(f"SELECTED SEGMENT: {start}s - {stop}s ({stop-start}s duration)")
-                print(f"{'='*60}")
-                print("Auto-approved (batch mode)\n")
-            
-            print(f"\n✓ Final highlight: {start}s - {stop}s")
-            #handle the case when the highlight starts from 0s
-            if start>0 and stop>0 and stop>start:
-                print(f"\nCreating short video: {start}s - {stop}s ({stop-start}s duration)")
-                print(f"Start: {start} , End: {stop}")
+    for clip in clips:
+        result = pipeline.render_clip(project, clip, style=args.style, framing=args.framing,
+                                      loudnorm=not args.no_loudnorm)
+        print(f"\n✓ {result['video']}\n{result['text']}")
+    return 0
 
-                print("Step 1/4: Extracting clip from original video...")
-                crop_video(Vid, temp_clip, start, stop)
 
-                print("Step 2/4: Cropping to vertical format (9:16)...")
-                crop_to_vertical(temp_clip, temp_cropped)
-                
-                print("Step 3/4: Adding subtitles to video...")
-                add_subtitles_to_video(temp_cropped, temp_subtitled, transcriptions, video_start_time=start)
-                
-                # Generate final output filename with random identifier
-                clean_title = clean_filename(video_title) if video_title else "output"
-                final_output = f"{clean_title}_{session_id}_short.mp4"
-                
-                print("Step 4/4: Adding audio to final video...")
-                combine_videos(temp_clip, temp_subtitled, final_output)
-                print(f"\n{'='*60}")
-                print(f"✓ SUCCESS: {final_output} is ready!")
-                print(f"{'='*60}\n")
-                
-                # Clean up temporary files
-                try:
-                    for temp_file in [audio_file, temp_clip, temp_cropped, temp_subtitled]:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                    print(f"Cleaned up temporary files for session {session_id}")
-                except Exception as e:
-                    print(f"Warning: Could not clean up some temporary files: {e}")
-            else:
-                print("Error in getting highlight")
-        else:
-            print("No transcriptions found")
-    else:
-        print("No audio file found")
-else:
-    print("Unable to process the video")
+if __name__ == "__main__":
+    sys.exit(main())

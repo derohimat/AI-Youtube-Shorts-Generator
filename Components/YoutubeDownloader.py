@@ -1,97 +1,69 @@
+"""Download YouTube videos without any interactive prompts.
+
+yt-dlp is used when installed (most reliable), pytubefix is the fallback.
+"""
+import glob
 import os
-from pytubefix import YouTube
-import ffmpeg
 
-def get_video_size(stream):
+from Components import config
 
-    return stream.filesize / (1024 * 1024)
 
-def download_youtube_video(url):
+def download_youtube_video(url, output_dir=None, max_height=None):
+    """Download `url` into `output_dir` and return (video_path, title)."""
+    output_dir = output_dir or os.path.join(config.WORK_DIR, "downloads")
+    max_height = max_height or config.MAX_DOWNLOAD_HEIGHT
+    os.makedirs(output_dir, exist_ok=True)
     try:
-        yt = YouTube(url)
+        return _download_ytdlp(url, output_dir, max_height)
+    except ImportError:
+        print("yt-dlp not installed, falling back to pytubefix")
+    return _download_pytubefix(url, output_dir, max_height)
 
-        video_streams = yt.streams.filter(type="video").order_by('resolution').desc()
-        audio_stream = yt.streams.filter(only_audio=True).first()
 
-        # Show available streams
-        print("\nAvailable video streams:")
-        for i, stream in enumerate(video_streams[:5]):  # Show top 5 options
-            size = get_video_size(stream)
-            stream_type = "Progressive" if stream.is_progressive else "Adaptive"
-            print(f"  {i}. Resolution: {stream.resolution}, Size: {size:.2f} MB, Type: {stream_type}")
-        
-        # Interactive selection with timeout
-        import select
-        import sys
-        
-        print("\nSelect resolution number (0-4) or wait 5s for auto-select...")
-        print("Auto-selecting highest quality in 5 seconds...")
-        
-        selected_stream = None
-        try:
-            ready, _, _ = select.select([sys.stdin], [], [], 5)
-            if ready:
-                user_input = sys.stdin.readline().strip()
-                if user_input.isdigit():
-                    choice = int(user_input)
-                    if 0 <= choice < len(video_streams):
-                        selected_stream = video_streams[choice]
-                        print(f"✓ User selected: {selected_stream.resolution}")
-                    else:
-                        print("Invalid choice, using highest quality")
-                        selected_stream = video_streams[0]
-                else:
-                    print("Invalid input, using highest quality")
-                    selected_stream = video_streams[0]
-            else:
-                print("\nTimeout - auto-selecting highest quality")
-                selected_stream = video_streams[0]
-        except:
-            print("\nAuto-selecting highest quality (timeout not available on this platform)")
-            selected_stream = video_streams[0]
-        
-        # Confirm selection
-        if selected_stream is None:
-            selected_stream = video_streams[0]
-        
-        size = get_video_size(selected_stream)
-        stream_type = "Progressive" if selected_stream.is_progressive else "Adaptive"
-        print(f"\nFinal selection: {selected_stream.resolution}, Size: {size:.2f} MB, Type: {stream_type}")
+def _download_ytdlp(url, output_dir, max_height):
+    import yt_dlp
 
-        if not os.path.exists('videos'):
-            os.makedirs('videos')
+    options = {
+        "format": (f"bv*[height<={max_height}][ext=mp4]+ba[ext=m4a]/"
+                   f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b"),
+        "merge_output_format": "mp4",
+        "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        path = ydl.prepare_filename(info)
+    if not os.path.exists(path):
+        matches = glob.glob(os.path.join(output_dir, f"{info['id']}.*"))
+        path = next((m for m in matches if m.endswith(".mp4")), matches[0] if matches else path)
+    return path, info.get("title") or info["id"]
 
-        print(f"Downloading video: {yt.title}")
-        video_file = selected_stream.download(output_path='videos', filename_prefix="video_")
 
-        if not selected_stream.is_progressive:
-            print("Downloading audio...")
-            audio_file = audio_stream.download(output_path='videos', filename_prefix="audio_")
+def _download_pytubefix(url, output_dir, max_height):
+    from pytubefix import YouTube
+    from Components.media import run_ffmpeg
 
-            print("Merging video and audio...")
-            output_file = os.path.join('videos', f"{yt.title}.mp4")
-            stream = ffmpeg.input(video_file)
-            audio = ffmpeg.input(audio_file)
-            stream = ffmpeg.output(stream, audio, output_file, vcodec='libx264', acodec='aac', strict='experimental')
-            ffmpeg.run(stream, overwrite_output=True)
+    yt = YouTube(url)
+    streams = yt.streams.filter(type="video").order_by("resolution").desc()
+    fitting = [s for s in streams if s.resolution and int(s.resolution.rstrip("p")) <= max_height]
+    stream = (fitting or list(streams))[0]
+    print(f"Downloading {yt.title} ({stream.resolution})")
 
-            os.remove(video_file)
-            os.remove(audio_file)
-        else:
-            output_file = video_file
+    video_file = stream.download(output_path=output_dir, filename=f"{yt.video_id}_video")
+    if stream.is_progressive:
+        return video_file, yt.title
 
-        
-        print(f"Downloaded: {yt.title} to 'videos' folder")
-        print(f"File path: {output_file}")
-        return output_file
+    audio_file = yt.streams.filter(only_audio=True).order_by("abr").desc().first().download(
+        output_path=output_dir, filename=f"{yt.video_id}_audio")
+    output_file = os.path.join(output_dir, f"{yt.video_id}.mp4")
+    run_ffmpeg(["-i", video_file, "-i", audio_file, "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy" if video_file.endswith(".mp4") else "libx264", "-c:a", "aac", output_file])
+    os.remove(video_file)
+    os.remove(audio_file)
+    return output_file, yt.title
 
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        print("Please make sure you have the latest version of pytube and ffmpeg-python installed.")
-        print("You can update them by running:")
-        print("pip install --upgrade pytube ffmpeg-python")
-        print("Also, ensure that ffmpeg is installed on your system and available in your PATH.")
 
 if __name__ == "__main__":
-    youtube_url = input("Enter YouTube video URL: ")
-    download_youtube_video(youtube_url)
+    print(download_youtube_video(input("Enter YouTube video URL: ")))

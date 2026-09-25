@@ -18,13 +18,10 @@ RUN apt-get update && apt-get install -y \
     libvpx-dev \
     pkg-config \
     libsrtp2-dev \
-    imagemagick \
+    fonts-dejavu-core \
     git \
     wget \
     && rm -rf /var/lib/apt/lists/*
-
-# Fix ImageMagick security policy for subtitle rendering
-RUN sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml
 
 # Set working directory
 WORKDIR /app
@@ -38,8 +35,8 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create output directory
-RUN mkdir -p /app/output
+# Create output/work directories
+RUN mkdir -p /app/output /app/work
 
 # Set environment variable for CUDA library path
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cublas/lib:$LD_LIBRARY_PATH
@@ -47,5 +44,9 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:/us
 # Make run.sh executable
 RUN chmod +x run.sh
 
-# Default command (can be overridden)
+# Web UI port
+EXPOSE 7860
+ENV GRADIO_SERVER_NAME=0.0.0.0
+
+# Default command: web UI (override with ./run.sh URL for CLI mode)
 CMD ["./run.sh"]

@@ -1,0 +1,7 @@
+# Optional LLM providers: install the one you set as LLM_PROVIDER
+langchain-anthropic>=0.3     # LLM_PROVIDER=anthropic
+langchain-google-genai>=2.0  # LLM_PROVIDER=gemini
+langchain-ollama>=0.3        # LLM_PROVIDER=ollama (free, runs locally)
+
+# Development
+pytest>=8

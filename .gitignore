@@ -18,3 +18,7 @@ venv/
 .env
 
 *.log
+# Generated
+work/
+output/
+.pytest_cache/

@@ -19,6 +19,7 @@ ENV/
 # Directories
 videos/
 output/
+work/
 
 # Git
 .git/

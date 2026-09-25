@@ -24,16 +24,20 @@ services:
     env_file:
       - .env
     
+    # Web UI at http://localhost:7860
+    ports:
+      - "7860:7860"
+
     # Mount volumes for input/output
     volumes:
-      - ./videos:/app/videos          # Input videos
-      - ./output:/app/output          # Output directory
-      - ./.env:/app/.env:ro           # OpenAI API key (read-only)
-    
-    # Interactive mode for URL input
+      - ./videos:/app/videos          # Put local videos here (use /app/videos/<file> as the source)
+      - ./output:/app/output          # Finished shorts
+      - ./work:/app/work              # Downloads + transcript cache
+      - ./.env:/app/.env:ro           # API keys (read-only)
+
     stdin_open: true
     tty: true
-    
-    # Command can be overridden
-    # Example: docker-compose run youtube-shorts-generator ./run.sh "https://youtu.be/VIDEO_ID"
+
+    # Default: web UI. CLI example:
+    #   docker-compose run youtube-shorts-generator ./run.sh "https://youtu.be/VIDEO_ID" --auto-approve
     command: ./run.sh
