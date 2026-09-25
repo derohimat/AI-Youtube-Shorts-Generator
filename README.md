@@ -132,7 +132,7 @@ OPENAI_BASE_URL=https://ai.paas.id
 LLM_MODEL=model-name-from-your-gateway
 ```
 
-You can also type the model name in the web UI under *Options → Model*. If the chosen model doesn't support tool calling, the app automatically switches to plain JSON replies.
+You can also pick or type the model name in the web UI under *Options → Model*. The list changes with the AI provider: `openai` (OpenAI or your gateway) lists GPT, Gemini and Claude names, `anthropic` lists Claude, and `gemini` lists Gemini. For `anthropic` and `gemini`, run `pip install -r requirements-extra.txt` (Codespaces installs these for you) and set `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY`. If the chosen model doesn't support tool calling, the app automatically switches to plain JSON replies.
 
 ## How it works
 

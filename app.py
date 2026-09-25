@@ -12,7 +12,7 @@ import gradio as gr
 from Components import config, pipeline
 from Components.captions import DEFAULT_PRESET, PRESETS, apply_text_edits
 from Components.framing import MODES
-from Components.highlights import PROVIDERS
+from Components.highlights import DEFAULT_MODELS, MODEL_CHOICES, PROVIDERS
 
 CLIP_HEADERS = ["#", "Score", "Start", "End", "Seconds", "Title", "Why it works"]
 CAPTION_HEADERS = ["Start", "End", "Caption text"]
@@ -74,6 +74,11 @@ def _find(choice, clips):
             if clip["id"] == wanted:
                 return clip
     return clips[0]
+
+
+def _models_for(provider):
+    """Refresh the model list when the AI provider changes."""
+    return gr.update(choices=MODEL_CHOICES.get(provider, []), value=DEFAULT_MODELS.get(provider, ""))
 
 
 def find_clips(url, upload, num_clips, min_len, max_len, instructions, provider, model, language,
@@ -210,7 +215,9 @@ def build_ui():
                 instructions = gr.Textbox(label="What should the AI look for? (optional)",
                                           placeholder="e.g. funny moments, practical tips, strong opinions", scale=3)
                 provider = gr.Dropdown(PROVIDERS, value=config.LLM_PROVIDER, label="AI provider", scale=1)
-                model = gr.Textbox(value=config.LLM_MODEL or "", label="Model (blank = default)", scale=1)
+                model = gr.Dropdown(MODEL_CHOICES.get(config.LLM_PROVIDER, []),
+                                    value=config.LLM_MODEL or DEFAULT_MODELS.get(config.LLM_PROVIDER, ""),
+                                    allow_custom_value=True, label="Model (pick or type a name)", scale=1)
                 language = gr.Textbox(label="Language code (blank = auto)", placeholder="en, id, es...", scale=1)
         find_btn = gr.Button("🔍 Find the best clips", variant="primary")
         status = gr.Markdown()
@@ -246,6 +253,7 @@ def build_ui():
                 result_files = gr.Files(label="Downloads (zip, videos, titles/hashtags, thumbnails)")
                 result_text = gr.Textbox(label="Titles, descriptions & hashtags (copy-paste ready)", lines=12)
 
+        provider.change(_models_for, provider, model)
         find_btn.click(find_clips, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language],
                        [project, clips, caption_edits, table, status, clip_choice, selected])
         more_btn.click(more_clips, [project, clips, table, caption_edits, num_clips, min_len, max_len,

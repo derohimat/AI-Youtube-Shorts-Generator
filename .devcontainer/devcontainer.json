@@ -17,6 +17,12 @@
     "OPENAI_BASE_URL": {
       "description": "Optional: OpenAI-compatible gateway URL, e.g. https://ai.paas.id. Leave empty for api.openai.com."
     },
+    "ANTHROPIC_API_KEY": {
+      "description": "Optional: Anthropic key to use Claude directly (provider: anthropic)."
+    },
+    "GOOGLE_API_KEY": {
+      "description": "Optional: Google AI Studio key to use Gemini directly (provider: gemini)."
+    },
     "LLM_MODEL": {
       "description": "Optional: model name to use (as listed by your provider/gateway). Empty = gpt-4o-mini."
     }

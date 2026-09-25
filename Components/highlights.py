@@ -20,6 +20,32 @@ DEFAULT_MODELS = {
 }
 PROVIDERS = list(DEFAULT_MODELS) + ["heuristic"]
 
+# Suggested models per provider for the UI dropdown: (label, model id). Any other name can be typed in.
+# The "openai" provider also covers OpenAI-compatible gateways (OPENAI_BASE_URL, e.g. paas.id), which
+# usually route Gemini and Claude models too; check your gateway's model list for its exact names.
+MODEL_CHOICES = {
+    "openai": [
+        ("GPT-4o mini (fast, cheap)", "gpt-4o-mini"),
+        ("GPT-4o", "gpt-4o"),
+        ("GPT-4.1 mini", "gpt-4.1-mini"),
+        ("Gemini 2.5 Flash (via gateway)", "gemini-2.5-flash"),
+        ("Gemini 2.5 Pro (via gateway)", "gemini-2.5-pro"),
+        ("Claude Sonnet 5 (via gateway)", "claude-sonnet-5"),
+        ("Claude Haiku 4.5 (via gateway)", "claude-haiku-4-5-20251001"),
+    ],
+    "anthropic": [
+        ("Claude Haiku 4.5 (fast, cheap)", "claude-haiku-4-5-20251001"),
+        ("Claude Sonnet 5", "claude-sonnet-5"),
+        ("Claude Opus 5.5 (best quality)", "claude-opus-5-5"),
+    ],
+    "gemini": [
+        ("Gemini 2.5 Flash (fast, cheap)", "gemini-2.5-flash"),
+        ("Gemini 2.5 Pro", "gemini-2.5-pro"),
+    ],
+    "ollama": [("Llama 3.1", "llama3.1"), ("Qwen 2.5", "qwen2.5"), ("Mistral", "mistral")],
+    "heuristic": [("No AI model (offline heuristic)", "")],
+}
+
 # Rough budget per LLM call (characters of transcript); longer videos are chunked.
 MAX_CHARS_PER_CALL = 60000
 SENTENCE_END = re.compile(r"[.!?…。！？]['\")\]]?$")
@@ -74,6 +100,16 @@ def chunk_segments(segments, max_chars=MAX_CHARS_PER_CALL, overlap=3):
     return chunks
 
 
+def _import(module, name, package):
+    """Import an optional provider package with an install hint instead of a bare ImportError."""
+    import importlib
+    try:
+        return getattr(importlib.import_module(module), name)
+    except ImportError:
+        raise ImportError(f"This provider needs an extra package: pip install {package} "
+                          f"(or: pip install -r requirements-extra.txt)") from None
+
+
 def get_llm(provider=None, model=None, temperature=None):
     """Return a LangChain chat model for the configured provider."""
     provider = (provider or config.LLM_PROVIDER).lower()
@@ -90,17 +126,17 @@ def get_llm(provider=None, model=None, temperature=None):
         # OPENAI_BASE_URL points the OpenAI SDK at any OpenAI-compatible gateway (e.g. https://ai.paas.id).
         return ChatOpenAI(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_BASE_URL, **kwargs)
     if provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
+        ChatAnthropic = _import("langchain_anthropic", "ChatAnthropic", "langchain-anthropic")
         if not config.ANTHROPIC_API_KEY:
             raise ValueError("Anthropic API key missing: set ANTHROPIC_API_KEY in .env")
         return ChatAnthropic(api_key=config.ANTHROPIC_API_KEY, max_tokens=4096, **kwargs)
     if provider == "gemini":
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        ChatGoogleGenerativeAI = _import("langchain_google_genai", "ChatGoogleGenerativeAI", "langchain-google-genai")
         if not config.GOOGLE_API_KEY:
             raise ValueError("Google API key missing: set GOOGLE_API_KEY in .env")
         return ChatGoogleGenerativeAI(google_api_key=config.GOOGLE_API_KEY, **kwargs)
     if provider == "ollama":
-        from langchain_ollama import ChatOllama
+        ChatOllama = _import("langchain_ollama", "ChatOllama", "langchain-ollama")
         return ChatOllama(base_url=config.OLLAMA_BASE_URL, **kwargs)
     raise ValueError(f"Unknown LLM provider '{provider}'. Choose one of: {', '.join(PROVIDERS)}")
 
