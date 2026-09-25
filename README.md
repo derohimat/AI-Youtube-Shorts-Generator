@@ -108,6 +108,7 @@ docker-compose run youtube-shorts-generator ./run.sh "https://youtu.be/VIDEO_ID"
 | `LLM_PROVIDER` | `openai` | `openai`, `anthropic`, `gemini`, `ollama`, `heuristic` |
 | `LLM_MODEL` | per provider | e.g. `gpt-5-nano`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`, `llama3.1` |
 | `OPENAI_API` / `OPENAI_API_KEY` | | OpenAI key |
+| `OPENAI_BASE_URL` | api.openai.com | any OpenAI-compatible gateway, e.g. `https://ai.paas.id` (use your gateway key as `OPENAI_API`) |
 | `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | | keys for the other providers |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | local Ollama server |
 | `WHISPER_MODEL` | `small` | `tiny`, `base`, `small`, `medium`, `large-v3` |
@@ -119,6 +120,19 @@ docker-compose run youtube-shorts-generator ./run.sh "https://youtu.be/VIDEO_ID"
 | `MAX_DOWNLOAD_HEIGHT` | `1080` | max YouTube download resolution |
 
 Caption styles are defined in `Components/captions.py` (`PRESETS`), where you can change fonts, colors, size and position. Fonts in `fonts/` are loaded automatically (Anton is bundled under the SIL Open Font License).
+
+### Using an OpenAI-compatible gateway (e.g. paas.id)
+
+Set these in `.env` (or as Codespaces secrets):
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_API=your_gateway_api_key
+OPENAI_BASE_URL=https://ai.paas.id
+LLM_MODEL=model-name-from-your-gateway
+```
+
+You can also type the model name in the web UI under *Options → Model*. If the chosen model doesn't support tool calling, the app automatically switches to plain JSON replies.
 
 ## How it works
 

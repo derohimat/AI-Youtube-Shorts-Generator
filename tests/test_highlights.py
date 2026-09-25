@@ -94,3 +94,56 @@ def test_heuristic_provider_works_offline():
     clips = highlights.find_highlights({"segments": SEGMENTS}, 8.0, num_clips=2, min_len=3, max_len=6,
                                        provider="heuristic")
     assert clips and all(c["end"] - c["start"] <= 6 + 5 for c in clips)
+
+
+def test_parse_json_clips_handles_fences_and_lists():
+    text = 'Sure!\n```json\n{"clips": [{"start": 1, "end": 5, "title": "A"}, {"title": "no times"}]}\n```'
+    assert highlights.parse_json_clips(text) == [{"start": 1, "end": 5, "title": "A"}]
+    assert highlights.parse_json_clips('[{"start": 2, "end": 9}]') == [{"start": 2, "end": 9}]
+
+
+class FailingStructured:
+    def invoke(self, messages):
+        raise ValueError("tool calling not supported by this model")
+
+
+class GatewayLLM:
+    """Model behind an OpenAI-compatible gateway without tool-calling support."""
+    def with_structured_output(self, schema, method=None):
+        return FailingStructured()
+
+    def invoke(self, messages):
+        class Reply:
+            content = '{"clips": [{"start": 2.5, "end": 8.0, "title": "Secret", "hook": "", "reason": "", ' \
+                      '"score": 8, "description": "", "hashtags": ["habits"]}]}'
+        return Reply()
+
+
+def test_falls_back_to_plain_json_when_tool_calling_fails():
+    clips = highlights.find_highlights({"segments": SEGMENTS}, 8.0, num_clips=2, min_len=3, max_len=10,
+                                       provider="openai", llm=GatewayLLM())
+    assert [c["title"] for c in clips] == ["Secret"]
+
+
+def test_auth_errors_are_not_swallowed():
+    class AuthenticationError(Exception):
+        pass
+
+    class BadKey(GatewayLLM):
+        def with_structured_output(self, schema, method=None):
+            class S:
+                def invoke(self, messages):
+                    raise AuthenticationError("invalid api key")
+            return S()
+
+    import pytest
+    with pytest.raises(AuthenticationError):
+        highlights.find_highlights({"segments": SEGMENTS}, 8.0, provider="openai", llm=BadKey())
+
+
+def test_openai_base_url_is_used(monkeypatch):
+    monkeypatch.setattr("Components.config.OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("Components.config.OPENAI_BASE_URL", "https://ai.paas.id")
+    llm = highlights.get_llm("openai", "some-model")
+    assert str(llm.openai_api_base).rstrip("/") == "https://ai.paas.id"
+    assert llm.model_name == "some-model"

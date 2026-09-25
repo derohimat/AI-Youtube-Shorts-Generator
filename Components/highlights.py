@@ -4,6 +4,7 @@ The LLM proposes several ranked clips (with title, hook, hashtags...), then
 every clip is snapped to word/sentence boundaries so cuts never land in the
 middle of a word, and overlapping clips are removed.
 """
+import json
 import re
 from typing import List
 
@@ -86,7 +87,8 @@ def get_llm(provider=None, model=None, temperature=None):
         from langchain_openai import ChatOpenAI
         if not config.OPENAI_API_KEY:
             raise ValueError("OpenAI API key missing: set OPENAI_API (or OPENAI_API_KEY) in .env")
-        return ChatOpenAI(api_key=config.OPENAI_API_KEY, **kwargs)
+        # OPENAI_BASE_URL points the OpenAI SDK at any OpenAI-compatible gateway (e.g. https://ai.paas.id).
+        return ChatOpenAI(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_BASE_URL, **kwargs)
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         if not config.ANTHROPIC_API_KEY:
@@ -103,8 +105,39 @@ def get_llm(provider=None, model=None, temperature=None):
     raise ValueError(f"Unknown LLM provider '{provider}'. Choose one of: {', '.join(PROVIDERS)}")
 
 
+# Errors that a different request format cannot fix; surface them instead of retrying.
+_FATAL_ERRORS = {"AuthenticationError", "PermissionDeniedError", "NotFoundError", "RateLimitError",
+                 "APIConnectionError", "APITimeoutError"}
+
+JSON_INSTRUCTIONS = """
+Reply with ONLY a JSON object, no other text, in this exact shape:
+{"clips": [{"start": 12.3, "end": 55.0, "title": "...", "hook": "...", "reason": "...", "score": 8,
+            "description": "...", "hashtags": ["tag1", "tag2"]}]}"""
+
+
+def parse_json_clips(text):
+    """Extract clip dicts from a plain-text LLM reply containing JSON."""
+    text = re.sub(r"```(?:json)?", "", str(text))
+    pairs = sorted((("{", "}"), ("[", "]")), key=lambda p: text.find(p[0]) if p[0] in text else len(text))
+    for opener, closer in pairs:
+        start, end = text.find(opener), text.rfind(closer)
+        if start == -1 or end <= start:
+            continue
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            continue
+        clips = data.get("clips", []) if isinstance(data, dict) else data
+        return [c for c in clips if isinstance(c, dict) and "start" in c and "end" in c]
+    raise ValueError(f"The AI reply did not contain valid clip JSON: {str(text)[:300]}")
+
+
 def ask_llm(segments, num_clips, min_len, max_len, instructions="", provider=None, model=None, llm=None):
-    """Ask the LLM for highlight candidates. Returns a list of dicts (unsnapped)."""
+    """Ask the LLM for highlight candidates. Returns a list of dicts (unsnapped).
+
+    Uses tool/function calling first; models behind OpenAI-compatible gateways that don't
+    support it fall back to a plain JSON reply.
+    """
     provider = (provider or config.LLM_PROVIDER).lower()
     llm = llm or get_llm(provider, model)
     method = "function_calling" if provider == "openai" else None
@@ -113,12 +146,22 @@ def ask_llm(segments, num_clips, min_len, max_len, instructions="", provider=Non
     extra = f"\nExtra instructions from the user: {instructions.strip()}" if instructions and instructions.strip() else ""
     system = SYSTEM_PROMPT.format(num_clips=num_clips, min_len=min_len, max_len=max_len, instructions=extra)
 
-    candidates = []
+    candidates, use_json = [], False
     for chunk in chunk_segments(segments):
-        response = structured.invoke([("system", system), ("user", format_transcript(chunk))])
-        if response is None:
-            continue
-        candidates.extend(c.model_dump() for c in response.clips)
+        messages = [("system", system), ("user", format_transcript(chunk))]
+        if not use_json:
+            try:
+                response = structured.invoke(messages)
+                if response is not None and response.clips:
+                    candidates.extend(c.model_dump() for c in response.clips)
+                    continue
+            except Exception as e:
+                if type(e).__name__ in _FATAL_ERRORS:
+                    raise
+                print(f"Structured output failed ({type(e).__name__}: {e}); falling back to plain JSON")
+            use_json = True
+        reply = llm.invoke([("system", system + JSON_INSTRUCTIONS), ("user", format_transcript(chunk))])
+        candidates.extend(parse_json_clips(getattr(reply, "content", reply)))
     return candidates
 
 

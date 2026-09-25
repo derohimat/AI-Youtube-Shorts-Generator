@@ -76,7 +76,7 @@ def _find(choice, clips):
     return clips[0]
 
 
-def find_clips(url, upload, num_clips, min_len, max_len, instructions, provider, language,
+def find_clips(url, upload, num_clips, min_len, max_len, instructions, provider, model, language,
                progress=gr.Progress()):
     source = upload or (url or "").strip()
     if not source:
@@ -86,7 +86,8 @@ def find_clips(url, upload, num_clips, min_len, max_len, instructions, provider,
     try:
         project = pipeline.prepare(source, progress=_progress(progress), language=language or None)
         clips = pipeline.suggest_clips(project, int(num_clips), int(min_len), int(max_len), instructions,
-                                       provider=provider, progress=_progress(progress))
+                                       provider=provider, model=(model or "").strip() or None,
+                                       progress=_progress(progress))
     except Exception as e:
         raise gr.Error(f"{type(e).__name__}: {e}")
     if not clips:
@@ -100,7 +101,7 @@ def find_clips(url, upload, num_clips, min_len, max_len, instructions, provider,
             gr.update(choices=labels, value=labels[: min(3, len(labels))]))
 
 
-def more_clips(project, clips, table, caption_edits, num_clips, min_len, max_len, instructions, provider,
+def more_clips(project, clips, table, caption_edits, num_clips, min_len, max_len, instructions, provider, model,
                progress=gr.Progress()):
     """Ask for different clips than the ones already found."""
     if not project:
@@ -108,7 +109,7 @@ def more_clips(project, clips, table, caption_edits, num_clips, min_len, max_len
     clips = _sync(project, clips, table, caption_edits)
     try:
         new = pipeline.suggest_clips(project, int(num_clips), int(min_len), int(max_len), instructions,
-                                     provider=provider, exclude=[(c["start"], c["end"]) for c in clips],
+                                     provider=provider, model=(model or "").strip() or None, exclude=[(c["start"], c["end"]) for c in clips],
                                      progress=_progress(progress))
     except Exception as e:
         raise gr.Error(f"{type(e).__name__}: {e}")
@@ -209,6 +210,7 @@ def build_ui():
                 instructions = gr.Textbox(label="What should the AI look for? (optional)",
                                           placeholder="e.g. funny moments, practical tips, strong opinions", scale=3)
                 provider = gr.Dropdown(PROVIDERS, value=config.LLM_PROVIDER, label="AI provider", scale=1)
+                model = gr.Textbox(value=config.LLM_MODEL or "", label="Model (blank = default)", scale=1)
                 language = gr.Textbox(label="Language code (blank = auto)", placeholder="en, id, es...", scale=1)
         find_btn = gr.Button("🔍 Find the best clips", variant="primary")
         status = gr.Markdown()
@@ -244,10 +246,10 @@ def build_ui():
                 result_files = gr.Files(label="Downloads (zip, videos, titles/hashtags, thumbnails)")
                 result_text = gr.Textbox(label="Titles, descriptions & hashtags (copy-paste ready)", lines=12)
 
-        find_btn.click(find_clips, [url, upload, num_clips, min_len, max_len, instructions, provider, language],
+        find_btn.click(find_clips, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language],
                        [project, clips, caption_edits, table, status, clip_choice, selected])
         more_btn.click(more_clips, [project, clips, table, caption_edits, num_clips, min_len, max_len,
-                                    instructions, provider],
+                                    instructions, provider, model],
                        [clips, table, status, clip_choice, selected])
         preview_btn.click(preview, [project, clips, table, caption_edits, clip_choice, style, framing],
                           [clips, table, preview_video, preview_image, captions_table])

@@ -29,6 +29,8 @@ LLM_TEMPERATURE = _env("LLM_TEMPERATURE")  # None -> provider default
 
 # Keep backward compatibility with the original OPENAI_API variable name.
 OPENAI_API_KEY = _env("OPENAI_API_KEY", _env("OPENAI_API"))
+# Any OpenAI-compatible gateway, e.g. https://ai.paas.id (None -> api.openai.com)
+OPENAI_BASE_URL = _env("OPENAI_BASE_URL")
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = _env("GOOGLE_API_KEY")
 OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://localhost:11434")

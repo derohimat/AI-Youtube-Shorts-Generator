@@ -13,6 +13,12 @@
     "OPENAI_API": {
       "description": "OpenAI API key used to pick the best clips (or set LLM_PROVIDER=heuristic to try without one).",
       "documentationUrl": "https://platform.openai.com/api-keys"
+    },
+    "OPENAI_BASE_URL": {
+      "description": "Optional: OpenAI-compatible gateway URL, e.g. https://ai.paas.id. Leave empty for api.openai.com."
+    },
+    "LLM_MODEL": {
+      "description": "Optional: model name to use (as listed by your provider/gateway). Empty = gpt-5-nano."
     }
   },
   "postCreateCommand": "bash .devcontainer/setup.sh",
