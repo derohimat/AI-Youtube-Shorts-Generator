@@ -18,7 +18,7 @@
       "description": "Optional: OpenAI-compatible gateway URL, e.g. https://ai.paas.id. Leave empty for api.openai.com."
     },
     "LLM_MODEL": {
-      "description": "Optional: model name to use (as listed by your provider/gateway). Empty = gpt-5-nano."
+      "description": "Optional: model name to use (as listed by your provider/gateway). Empty = gpt-4o-mini."
     }
   },
   "postCreateCommand": "bash .devcontainer/setup.sh",

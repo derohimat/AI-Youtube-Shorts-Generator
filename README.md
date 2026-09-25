@@ -106,7 +106,7 @@ docker-compose run youtube-shorts-generator ./run.sh "https://youtu.be/VIDEO_ID"
 | Variable | Default | Meaning |
 |---|---|---|
 | `LLM_PROVIDER` | `openai` | `openai`, `anthropic`, `gemini`, `ollama`, `heuristic` |
-| `LLM_MODEL` | per provider | e.g. `gpt-5-nano`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`, `llama3.1` |
+| `LLM_MODEL` | per provider | e.g. `gpt-4o-mini`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`, `llama3.1` |
 | `OPENAI_API` / `OPENAI_API_KEY` | | OpenAI key |
 | `OPENAI_BASE_URL` | api.openai.com | any OpenAI-compatible gateway, e.g. `https://ai.paas.id` (use your gateway key as `OPENAI_API`) |
 | `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | | keys for the other providers |

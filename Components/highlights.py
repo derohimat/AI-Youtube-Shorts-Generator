@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from Components import config
 
 DEFAULT_MODELS = {
-    "openai": "gpt-5-nano",
+    "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5-20251001",
     "gemini": "gemini-2.5-flash",
     "ollama": "llama3.1",
