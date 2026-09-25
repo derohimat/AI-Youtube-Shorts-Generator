@@ -1,0 +1,37 @@
+{
+  "name": "AI Shorts Generator",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb"
+  },
+  "containerEnv": {
+    "GRADIO_SERVER_NAME": "0.0.0.0",
+    "WHISPER_MODEL": "small"
+  },
+  "secrets": {
+    "OPENAI_API": {
+      "description": "OpenAI API key used to pick the best clips (or set LLM_PROVIDER=heuristic to try without one).",
+      "documentationUrl": "https://platform.openai.com/api-keys"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postAttachCommand": {
+    "app": "python app.py"
+  },
+  "forwardPorts": [7860],
+  "portsAttributes": {
+    "7860": {
+      "label": "Shorts Generator",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["README.md"]
+    },
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}

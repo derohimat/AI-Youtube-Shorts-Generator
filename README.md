@@ -22,6 +22,20 @@ Paste a link → the AI finds the best moments → you tick the ones you like �
 - **📦 Organized output**: `output/<video>/01-<clip-title>.mp4` plus `.txt` (title, description, hashtags), a `.jpg` thumbnail, and `shorts.zip`.
 - **💾 Caching**: downloads and transcripts are cached, so re-running the same video skips straight to clip selection.
 
+## Try it in your browser (GitHub Codespaces, nothing to install)
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/derohimat/AI-Youtube-Shorts-Generator?quickstart=1)
+
+1. Click the badge above, or go to **Code → Codespaces → Create codespace on main**.
+2. When asked, paste your OpenAI key into the `OPENAI_API` secret. You can skip it and pick the `heuristic` AI provider in the UI.
+3. Wait for setup to finish (about 3–5 minutes the first time). The web UI opens automatically at `https://<your-codespace>-7860.app.github.dev`. If it doesn't, open the **Ports** tab and click the globe icon next to port 7860.
+
+Notes:
+- The link is private to your GitHub account by default. Codespaces are free for personal accounts up to 120 core-hours per month, and they stop automatically when idle.
+- Codespaces have no GPU, so transcription runs on the CPU. With the default `small` model, a 10-minute video takes a few minutes. Set `WHISPER_MODEL=base` in `.env` for faster, less accurate transcripts.
+- YouTube sometimes blocks downloads from cloud servers ("Sign in to confirm you're not a bot"). If that happens, download the video yourself and use the upload box instead.
+- To restart the app, run `python app.py` in the terminal.
+
 ## Installation
 
 ### Prerequisites
