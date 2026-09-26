@@ -70,25 +70,21 @@ cp .env.example .env                # then put your API key in .env
 ./run.sh                 # or: python app.py
 ```
 
-Open **http://127.0.0.1:7860** and:
+Open **http://127.0.0.1:7860**. The page is a step-by-step wizard (in Indonesian). Every step is saved automatically:
 
-1. **Your video**: paste a YouTube link or upload a file. Under *Options*, set how many clips you want, the min/max length, and what the AI should look for (e.g. "funny moments", "practical tips"). Click **Find the best clips**.
-2. **Pick & fine-tune**: review the ranked clips. Edit **Start**, **End** (`m:ss`) or **Title** directly in the table.
-3. **Preview & style**: choose a caption style and framing, then click **Preview** to watch the original moment and see a still of how the short will look. Fix caption typos and click **Save caption edits**.
-4. **Render & download**: tick the clips you want and click **Render**. Download the zip or individual files, and copy the titles and hashtags.
+| Step | What you do |
+|---|---|
+| **0 · Proyek** | Start a new project, or click **▶ Lanjutkan** on an earlier video. It reopens at the step where you stopped, without downloading or transcribing again. You can also delete old projects here to free disk space; shorts in `output/` are kept. |
+| **1 · Sumber** | Paste a YouTube link or upload a video, and pick the platform (Shorts / TikTok / Reels / long clips). This sets the clip length and number of clips. Optionally describe what to look for ("funny moments", "practical tips"). The AI provider, model and language are under *Pengaturan lanjutan*. |
+| **2 · Analisis** | Download → transcription → AI finds the best moments, with progress. |
+| **3 · Pilih klip** | Cards with a preview, score and reason. The best 3 are pre-selected; click **Pakai klip ini** to add or remove one. **Cari klip lain** asks the AI for different moments. |
+| **4 · Edit** | One clip at a time ("Klip 1 dari 3"). **Tick the sentences to include** in the transcript table; a clip is always one continuous piece, so gaps are filled. Fix the title, description, hashtags and caption typos, then click **Buat preview 9:16** to see the result with framing and captions. |
+| **5 · Gaya** | Caption style, framing and loudness for all clips, with a live preview. |
+| **6 · Render** | Renders the selected clips. Watch them, copy each title/description/hashtags, and download everything as a zip. **Edit klip lagi** goes back to change something and render again. |
 
 Use `./run.sh --ui --share` to get a temporary public link, for example to use the tool from your phone.
 
-### History: continue later
-
-Every video you process is saved automatically: the download, the transcript, the suggested clips, your start/end/title and caption edits, your style settings, and the rendered shorts. Open the **🕘 History** tab to:
-
-- see all earlier videos, with the number of clips and renders
-- watch and download previous renders again
-- click **Open & continue** to load everything back into the Create tab. You can edit, preview or **render again without downloading or transcribing the video again.**
-- **Delete from history** to free disk space. This removes the cached download and transcript in `work/`; finished shorts in `output/` are kept.
-
-Uploaded videos are copied into `work/uploads/` so they can be reopened after a restart. Uploading the same file again reuses the same project. Projects created from the command line appear in History too.
+Uploaded videos are copied into `work/uploads/` so projects can be reopened after a restart. Projects created from the command line also appear in the project list.
 
 ### Command line
 

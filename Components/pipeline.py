@@ -178,7 +178,8 @@ def list_history():
             "n_renders": len(renders),
             "updated_at": session.get("updated_at") or time.strftime(
                 "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(os.path.join(work_dir, "project.json")))),
-            "thumbnail": renders[-1]["thumbnail"] if renders else None,
+            "n_kept": sum(1 for c in session["clips"] if c.get("keep")),
+            "thumbnail": renders[-1]["thumbnail"] if renders else project_thumbnail(project),
         })
     rows.sort(key=lambda r: r["updated_at"], reverse=True)
     return rows
@@ -273,6 +274,42 @@ def adjust_clip(project, clip, start, end, snap=True):
     return {**clip, "start": start, "end": end}
 
 
+def transcript_sentences(project, max_len=25.0):
+    """Split the transcript into sentences (also broken at Whisper segment ends / long runs)."""
+    sentences, current = [], []
+    for word in all_words(project["transcript"]["segments"]):
+        current.append(word)
+        if word["sentence_end"] or word["segment_end"] or current[-1]["e"] - current[0]["s"] > max_len:
+            sentences.append({"start": current[0]["s"], "end": current[-1]["e"],
+                              "text": " ".join(w["w"] for w in current)})
+            current = []
+    if current:
+        sentences.append({"start": current[0]["s"], "end": current[-1]["e"],
+                          "text": " ".join(w["w"] for w in current)})
+    return sentences
+
+
+def clip_sentences(project, clip, context=45.0):
+    """Sentences around a clip, each flagged `in_clip`, for editing a clip by ticking sentences."""
+    rows = []
+    for sentence in transcript_sentences(project):
+        if sentence["end"] < clip["start"] - context or sentence["start"] > clip["end"] + context:
+            continue
+        mid = (sentence["start"] + sentence["end"]) / 2
+        rows.append({**sentence, "in_clip": clip["start"] <= mid <= clip["end"]})
+    return rows
+
+
+def clip_from_sentences(project, clip, sentences, checked):
+    """New clip covering the first..last checked sentence (clips are always one continuous piece)."""
+    idx = [i for i, on in enumerate(checked) if on]
+    if not idx:
+        raise ValueError("Tick at least one sentence.")
+    start = max(0.0, sentences[idx[0]]["start"] - 0.15)
+    end = min(project["duration"], sentences[idx[-1]]["end"] + 0.3)
+    return {**clip, "start": round(start, 2), "end": round(end, 2)}
+
+
 def caption_lines(project, clip, style=DEFAULT_PRESET):
     return lines_for_clip(project["transcript"], clip["start"], clip["end"], style)
 
@@ -295,6 +332,31 @@ def style_still(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None)
     path = os.path.join(project["work_dir"], "previews", f"style_{clip['start']:.2f}_{style}_{framing}.jpg")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return render_still(project["video_path"], clip["start"], clip["end"], plan, path, lines, style)
+
+
+def quick_preview(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None):
+    """Fast low-resolution 9:16 preview with the final framing and captions."""
+    lines = lines if lines is not None else caption_lines(project, clip, style)
+    key = hashlib.sha1(json.dumps([clip["start"], clip["end"], style, framing,
+                                   [l["text"] for l in lines]]).encode()).hexdigest()[:10]
+    path = os.path.join(project["work_dir"], "previews", f"short_{key}.mp4")
+    if not os.path.exists(path):
+        plan = plan_framing(project["video_path"], clip["start"], clip["end"], framing,
+                            (project["width"], project["height"]))
+        render_short(project["video_path"], clip["start"], clip["end"], plan, path, caption_lines=lines,
+                     preset=style, has_audio=project.get("has_audio", True), size=(360, 640), fast=True)
+    return path
+
+
+def project_thumbnail(project):
+    """A cover image for the project list (frame at 10% of the video), cached."""
+    path = os.path.join(project["work_dir"], "cover.jpg")
+    if not os.path.exists(path):
+        try:
+            thumbnail(project["video_path"], path, at=round(project.get("duration", 10) * 0.1, 2))
+        except media.FFmpegError:
+            return None
+    return path
 
 
 def render_clip(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None, loudnorm=True,

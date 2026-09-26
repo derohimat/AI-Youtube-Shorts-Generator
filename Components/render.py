@@ -37,8 +37,8 @@ def video_filter(plan, out_w=None, out_h=None):
             f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v0]")
 
 
-def _full_filter(plan, ass_path):
-    graph = video_filter(plan)
+def _full_filter(plan, ass_path, size=None):
+    graph = video_filter(plan, *(size or (None, None)))
     if ass_path:
         graph += (f";[v0]ass=filename={filter_path(os.path.basename(ass_path))}"
                   f":fontsdir={filter_path(config.FONTS_DIR)}[v]")
@@ -53,26 +53,31 @@ def _video_codec_args():
     return ["-c:v", "libx264", "-preset", config.VIDEO_PRESET, "-crf", config.VIDEO_CRF]
 
 
-def _prepare_ass(lines, preset, out_path):
+def _prepare_ass(lines, preset, out_path, size=None):
     if not lines or preset == "none":
         return None
     ass_path = os.path.splitext(out_path)[0] + ".ass"
-    write_ass(ass_path, lines, preset, config.OUTPUT_WIDTH, config.OUTPUT_HEIGHT)
+    width, height = size or (config.OUTPUT_WIDTH, config.OUTPUT_HEIGHT)
+    write_ass(ass_path, lines, preset, width, height)
     return ass_path
 
 
 def render_short(src, start, end, plan, out_path, caption_lines=None, preset="bold-yellow",
-                 loudnorm=True, has_audio=True):
-    """Render [start, end] of `src` to a vertical MP4 at `out_path`."""
+                 loudnorm=True, has_audio=True, size=None, fast=False):
+    """Render [start, end] of `src` to a vertical MP4 at `out_path`.
+
+    `size=(w, h)` overrides the output resolution; `fast=True` makes a quick low-quality preview.
+    """
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    ass_path = _prepare_ass(caption_lines, preset, out_path)
+    ass_path = _prepare_ass(caption_lines, preset, out_path, size)
     args = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", os.path.abspath(src),
-            "-filter_complex", _full_filter(plan, ass_path), "-map", "[v]"]
-    args += _video_codec_args() + ["-pix_fmt", "yuv420p"]
+            "-filter_complex", _full_filter(plan, ass_path, size), "-map", "[v]"]
+    codec = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", 30] if fast else _video_codec_args()
+    args += codec + ["-pix_fmt", "yuv420p"]
     if has_audio:
         args += ["-map", "0:a:0"]
-        if loudnorm:
+        if loudnorm and not fast:
             args += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
         args += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
     args += ["-movflags", "+faststart", out_path]

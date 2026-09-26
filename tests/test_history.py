@@ -99,3 +99,18 @@ def test_save_session_after_delete_is_a_noop(work):
     project = make_project(work, "aaaaaaaa", "Talk")
     pipeline.delete_project("aaaaaaaa")
     assert pipeline.save_session(project, clips=[{"id": 1}]) is None
+
+
+def test_sentence_editing(work):
+    project = make_project(work, "aaaaaaaa", "Talk")
+    words = [("Hello", 0.0, 0.5), ("there.", 0.6, 1.0), ("This", 2.0, 2.3), ("is", 2.4, 2.6), ("great.", 2.7, 3.2),
+             ("Bye", 5.0, 5.4), ("now.", 5.5, 6.0)]
+    project["transcript"]["segments"] = [{"text": "all", "start": 0, "end": 6,
+                                          "words": [{"w": w, "s": s, "e": e} for w, s, e in words]}]
+    assert [s["text"] for s in pipeline.transcript_sentences(project)] == ["Hello there.", "This is great.", "Bye now."]
+    rows = pipeline.clip_sentences(project, {"start": 1.9, "end": 3.5})
+    assert [r["in_clip"] for r in rows] == [False, True, False]
+    clip = pipeline.clip_from_sentences(project, {"id": 1, "start": 1.9, "end": 3.5}, rows, [True, False, True])
+    assert (clip["start"], clip["end"], clip["id"]) == (0.0, 6.3, 1)   # gaps filled (one continuous clip), end padded 0.3s
+    with pytest.raises(ValueError):
+        pipeline.clip_from_sentences(project, clip, rows, [False, False, False])
