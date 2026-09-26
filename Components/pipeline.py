@@ -11,6 +11,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import threading
+import time
 
 from Components import config, media
 from Components.captions import DEFAULT_PRESET, lines_for_clip
@@ -66,6 +69,142 @@ def load_project(project_dir):
 def _save_project(project):
     with open(os.path.join(project["work_dir"], "project.json"), "w", encoding="utf-8") as f:
         json.dump(project, f, ensure_ascii=False, indent=1)
+
+
+def _write_json(path, data):
+    """Write JSON atomically so a crash never leaves a half-written file."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # unique per writer
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def import_upload(path):
+    """Copy an uploaded file (from Gradio's temp folder) into work/uploads once.
+
+    The name is derived from the file's content, so uploading the same video again
+    reuses the same project (download + transcript cache and history).
+    """
+    digest = hashlib.sha1(str(os.path.getsize(path)).encode())
+    with open(path, "rb") as f:
+        digest.update(f.read(8 * 1024 * 1024))
+    upload_dir = os.path.join(config.WORK_DIR, "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    target = os.path.join(upload_dir, f"{digest.hexdigest()[:10]}_{os.path.basename(path)}")
+    if not os.path.exists(target):
+        shutil.copy2(path, target)
+    return target
+
+
+# ---- Session history: clips, edits, settings and renders per project ----
+
+SESSION_FILE = "session.json"
+_PROJECT_ID = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _project_path(project_id):
+    if not _PROJECT_ID.match(str(project_id)):
+        raise ValueError(f"Invalid project id: {project_id!r}")
+    return os.path.join(config.WORK_DIR, project_id)
+
+
+def load_session(project):
+    path = os.path.join(project["work_dir"], SESSION_FILE)
+    if not os.path.exists(path):
+        return {"clips": [], "caption_edits": {}, "settings": {}, "renders": []}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for key, default in (("clips", []), ("caption_edits", {}), ("settings", {}), ("renders", [])):
+        data.setdefault(key, default)
+    return data
+
+
+def save_session(project, clips=None, caption_edits=None, settings=None, render_results=None):
+    """Merge the given fields into the project's session.json and return the session.
+
+    Returns None if the project was deleted from history in the meantime.
+    """
+    if not os.path.isdir(project["work_dir"]):
+        return None
+    with _SESSION_LOCK:
+        return _save_session(project, clips, caption_edits, settings, render_results)
+
+
+_SESSION_LOCK = threading.Lock()
+
+
+def _save_session(project, clips, caption_edits, settings, render_results):
+    session = load_session(project)
+    if clips is not None:
+        session["clips"] = clips
+    if caption_edits is not None:
+        session["caption_edits"] = caption_edits
+    if settings:
+        session["settings"] = {**session["settings"], **settings}
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    for result in render_results or []:
+        clip = result["clip"]
+        session["renders"] = [r for r in session["renders"] if r["clip_id"] != clip["id"]] + [{
+            "clip_id": clip["id"], "title": clip.get("title", ""), "video": result["video"],
+            "metadata": result["metadata"], "thumbnail": result["thumbnail"], "text": result["text"],
+            "style": result.get("style"), "framing": result.get("framing"), "rendered_at": now,
+        }]
+    session["updated_at"] = now
+    _write_json(os.path.join(project["work_dir"], SESSION_FILE), session)
+    return session
+
+
+def list_history():
+    """Projects that can be reopened without downloading, newest first."""
+    rows = []
+    if not os.path.isdir(config.WORK_DIR):
+        return rows
+    for name in os.listdir(config.WORK_DIR):
+        if not _PROJECT_ID.match(name):
+            continue
+        work_dir = os.path.join(config.WORK_DIR, name)
+        try:
+            project = load_project(work_dir)
+        except (OSError, ValueError):
+            continue
+        if not os.path.exists(project.get("video_path", "")):
+            continue
+        project["work_dir"] = work_dir
+        session = load_session(project)
+        renders = [r for r in session["renders"] if os.path.exists(r["video"])]
+        rows.append({
+            "id": name, "title": project.get("title", name), "source": project.get("source", ""),
+            "duration": project.get("duration", 0), "n_clips": len(session["clips"]),
+            "n_renders": len(renders),
+            "updated_at": session.get("updated_at") or time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(os.path.join(work_dir, "project.json")))),
+            "thumbnail": renders[-1]["thumbnail"] if renders else None,
+        })
+    rows.sort(key=lambda r: r["updated_at"], reverse=True)
+    return rows
+
+
+def open_project(project_id):
+    """Load a cached project and its session. Never downloads or transcribes."""
+    work_dir = _project_path(project_id)
+    project = load_project(work_dir)
+    project["work_dir"] = work_dir
+    if not os.path.exists(project["video_path"]):
+        raise FileNotFoundError("The cached video for this project is gone; add it again from the Create tab.")
+    session = load_session(project)
+    session["renders"] = [r for r in session["renders"] if os.path.exists(r["video"])]
+    return project, session
+
+
+def delete_project(project_id):
+    """Delete a project's cached download, transcript and previews. Rendered shorts in output/ are kept."""
+    work_dir = _project_path(project_id)
+    project = load_project(work_dir)
+    video = project.get("video_path", "")
+    uploads = os.path.join(config.WORK_DIR, "uploads")
+    if video and os.path.dirname(os.path.abspath(video)) == os.path.abspath(uploads) and os.path.exists(video):
+        os.remove(video)  # our own copy of an uploaded file
+    shutil.rmtree(work_dir)
 
 
 def prepare(source, progress=None, language=None, whisper_model=None, force=False):
@@ -183,7 +322,7 @@ def render_clip(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None,
         f.write(text)
     progress(1.0, f"Clip {index}: done -> {video}")
     return {"video": video, "thumbnail": thumb, "metadata": base + ".txt", "text": text,
-            "clip": clip, "framing": plan["mode"]}
+            "clip": clip, "framing": plan["mode"], "style": style}
 
 
 def metadata_text(clip):

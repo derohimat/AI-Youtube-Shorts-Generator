@@ -57,12 +57,16 @@ def main(argv=None):
     if not clips:
         print("No suitable clips found.")
         return 1
+    pipeline.save_session(project, clips=clips, caption_edits={}, settings=dict(
+        num_clips=args.clips, min_len=args.min_len, max_len=args.max_len, instructions=args.instructions,
+        provider=args.provider, model=args.model, style=args.style, framing=args.framing))
     if not args.auto_approve:
         clips = choose_clips(clips)
 
     for clip in clips:
         result = pipeline.render_clip(project, clip, style=args.style, framing=args.framing,
                                       loudnorm=not args.no_loudnorm)
+        pipeline.save_session(project, render_results=[result])
         print(f"\n✓ {result['video']}\n{result['text']}")
     return 0
 
