@@ -79,6 +79,17 @@ Open **http://127.0.0.1:7860** and:
 
 Use `./run.sh --ui --share` to get a temporary public link, for example to use the tool from your phone.
 
+### History: continue later
+
+Every video you process is saved automatically: the download, the transcript, the suggested clips, your start/end/title and caption edits, your style settings, and the rendered shorts. Open the **🕘 History** tab to:
+
+- see all earlier videos, with the number of clips and renders
+- watch and download previous renders again
+- click **Open & continue** to load everything back into the Create tab. You can edit, preview or **render again without downloading or transcribing the video again.**
+- **Delete from history** to free disk space. This removes the cached download and transcript in `work/`; finished shorts in `output/` are kept.
+
+Uploaded videos are copied into `work/uploads/` so they can be reopened after a restart. Uploading the same file again reuses the same project. Projects created from the command line appear in History too.
+
 ### Command line
 
 ```bash
