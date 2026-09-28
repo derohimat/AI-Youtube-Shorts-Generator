@@ -82,6 +82,11 @@ Open **http://127.0.0.1:7860**. The page is a step-by-step wizard (in Indonesian
 | **5 · Gaya** | Caption style, framing and loudness for all clips, with a live preview. |
 | **6 · Render** | Renders the selected clips. Watch them, copy each title/description/hashtags, and download everything as a zip. **Edit klip lagi** goes back to change something and render again. |
 
+**More engaging shorts** (options in step 5 · Gaya, all on by default):
+- **Hook**: a bold title in the first 3 seconds. The AI suggests it; edit or clear it per clip in step 4 · Edit.
+- **Cut silences and filler sounds** ("um", "uh", "eh", "em"...). Pauses longer than 0.6 s and filler sounds are removed, so the short is tighter; captions and camera moves follow the new timing. Real words are never cut.
+- **Keyword colors**: the AI marks 3-6 important words per clip (numbers, names, key nouns) and the captions show them in an accent color.
+
 **Background processing.** Analysis and rendering run in the background, so you can close the page and come back later: the project card shows the progress (for example "⏳ Analisis 45%"). If the server restarts mid-job, the job is marked *terhenti* (interrupted); open the project and click **🔄 Coba lagi** to retry.
 
 **Before a long run**, open *Pengaturan lanjutan* and click **🔌 Tes koneksi AI**. It checks your API key, base URL (e.g. paas.id) and model name in a few seconds.

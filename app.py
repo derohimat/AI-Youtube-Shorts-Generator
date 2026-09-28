@@ -44,6 +44,14 @@ CSS = """
 
 # ---------------------------------------------------------------- helpers
 
+OPT_KEYS = ["style", "framing", "loudnorm", "cut_silence", "cut_fillers", "hook", "keywords"]
+
+
+def _opts(*values):
+    """Option dict from the Gaya step components (in OPT_KEYS order)."""
+    return dict(zip(OPT_KEYS, values))
+
+
 def _progress(progress):
     return lambda fraction, message: progress(fraction, desc=message)
 
@@ -117,7 +125,7 @@ def open_project(project_id):
     work_dir = os.path.join(config.WORK_DIR, project_id)
     job = jobs.read(work_dir)
     if not os.path.exists(os.path.join(work_dir, "project.json")):
-        keep = (gr.update(),) * 17  # outputs except analyze_status, tabs, job_dir, job_seen
+        keep = (gr.update(),) * 21  # outputs except analyze_status, tabs, job_dir, job_seen
         return keep[:5] + (_job_text(job),) + keep[5:] + (_go("analyze"), work_dir, "")
     try:
         project, session = pipeline.open_project(project_id)
@@ -142,7 +150,8 @@ def open_project(project_id):
         st.get("max_len", 60), provider,
         gr.update(choices=MODEL_CHOICES.get(provider, []), value=st.get("model") or DEFAULT_MODELS.get(provider)),
         st.get("language", ""), st.get("style", DEFAULT_PRESET), st.get("framing", "auto"),
-        st.get("loudnorm", True), _zip(session["renders"]) if session["renders"] else None,
+        st.get("loudnorm", True), st.get("cut_silence", True), st.get("cut_fillers", True), st.get("hook", True),
+        st.get("keywords", True), _zip(session["renders"]) if session["renders"] else None,
         _go(step), work_dir, seen,
     )
 
@@ -329,15 +338,15 @@ def load_edit(project, clips, idx, caption_edits, style, max_len):
         raise gr.Error("Buka atau buat proyek dulu.")
     kept, idx, clip = _current(clips, idx)
     sentences = pipeline.clip_sentences(project, clip)
-    return (idx, f"### Klip {idx + 1} dari {len(kept)}", clip["title"], clip.get("description", ""),
-            " ".join(f"#{t}" for t in clip.get("hashtags") or []),
+    return (idx, f"### Klip {idx + 1} dari {len(kept)}", clip["title"], clip.get("hook_text", clip["title"]),
+            clip.get("description", ""), " ".join(f"#{t}" for t in clip.get("hashtags") or []),
             sentences, _sentence_rows(sentences), _clip_info(clip, max_len),
             _caption_rows(_lines(project, clip, style, caption_edits)), None)
 
 
 def load_edit_if_any(project, clips, idx, caption_edits, style, max_len):
     if not project or not _kept(clips):
-        return (gr.update(),) * 10
+        return (gr.update(),) * 11
     return load_edit(project, clips, idx, caption_edits, style, max_len)
 
 
@@ -345,12 +354,13 @@ def _replace(clips, clip):
     return [clip if c["id"] == clip["id"] else c for c in clips]
 
 
-def commit_fields(project, clips, idx, title, description, hashtags):
-    """Store title/description/hashtags of the clip being edited."""
+def commit_fields(project, clips, idx, title, hook_text, description, hashtags):
+    """Store title/hook/description/hashtags of the clip being edited."""
     if not project or not _kept(clips):
         return clips
     _, _, clip = _current(clips, idx)
-    clip = {**clip, "title": (title or "").strip() or clip["title"], "description": (description or "").strip(),
+    clip = {**clip, "title": (title or "").strip() or clip["title"], "hook_text": (hook_text or "").strip(),
+            "description": (description or "").strip(),
             "hashtags": normalize_hashtags((hashtags or "").replace(",", " ").split())}
     clips = _replace(clips, clip)
     _save(project, clips)
@@ -387,11 +397,12 @@ def edit_captions(project, clips, idx, table, caption_edits, style):
     return caption_edits
 
 
-def edit_preview(project, clips, idx, caption_edits, style, framing, progress=gr.Progress()):
+def edit_preview(project, clips, idx, caption_edits, *opt_values, progress=gr.Progress()):
     _, _, clip = _current(clips, idx)
+    opts = _opts(*opt_values)
     progress(0.2, desc="Membuat preview 9:16...")
     try:
-        return pipeline.quick_preview(project, clip, style, framing, _lines(project, clip, style, caption_edits))
+        return pipeline.quick_preview(project, clip, opts, _lines(project, clip, opts["style"], caption_edits))
     except Exception as e:
         raise _error(e)
 
@@ -407,35 +418,41 @@ def style_clip_choices(clips):
     return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
 
-def style_preview(project, clips, clip_id, caption_edits, style, framing):
+def style_preview(project, clips, clip_id, caption_edits, *opt_values):
     if not project or not clips:
         return None
+    opts = _opts(*opt_values)
     clip = next((c for c in clips if c["id"] == clip_id), None) or (_kept(clips) or clips)[0]
     try:
-        still = pipeline.style_still(project, clip, style, framing, lines=_lines(project, clip, style, caption_edits))
+        still = pipeline.style_still(project, clip, opts, lines=_lines(project, clip, opts["style"], caption_edits))
     except Exception as e:
         raise _error(e)
-    _save(project, style=style, framing=framing)
+    _save(project, **opts)
     return still
 
 
 # ---------------------------------------------------------------- 6. render
 
-def render_summary(clips, style, framing):
+def render_summary(clips, *opt_values):
+    opts = _opts(*opt_values)
+    style, framing = opts["style"], opts["framing"]
     kept = _kept(clips)
     if not kept:
         return "Belum ada klip yang dipilih. Kembali ke langkah **3 · Pilih klip**."
     items = "\n".join(f"{i}. **{c['title']}** ({_dur(c):.0f} dtk)" for i, c in enumerate(kept, 1))
     style_label = dict((v, k) for k, v in STYLE_CHOICES).get(style, style)
     framing_label = dict((v, k) for k, v in FRAMING_CHOICES).get(framing, framing)
-    return f"**{len(kept)} klip** akan di-render · caption: *{style_label}* · framing: *{framing_label}*\n\n{items}"
+    extras = [label for key, label in (("cut_silence", "tanpa jeda diam"), ("cut_fillers", "tanpa kata pengisi"),
+                                       ("hook", "hook di awal"), ("keywords", "kata kunci berwarna")) if opts.get(key)]
+    return (f"**{len(kept)} klip** akan di-render · caption: *{style_label}* · framing: *{framing_label}*"
+            f"{' · ' + ', '.join(extras) if extras else ''}\n\n{items}")
 
 
-def start_render(project, clips, caption_edits, style, framing, loudnorm):
+def start_render(project, clips, caption_edits, *opt_values):
     if not project or not _kept(clips):
         raise gr.Error("Pilih minimal satu klip dulu.")
-    _save(project, clips, caption_edits, style=style, framing=framing, loudnorm=loudnorm)
-    params = dict(style=style, framing=framing, loudnorm=loudnorm)
+    params = _opts(*opt_values)
+    _save(project, clips, caption_edits, **params)
     try:
         job = jobs.submit(project["work_dir"], "render", partial(pipeline.render_project, project, **params), params)
     except RuntimeError as e:
@@ -495,7 +512,7 @@ def build_ui():
                                     btn.click(partial(open_project, row["id"]), None, wiring["open"]).success(
                                         load_edit_if_any, wiring["edit_in"], wiring["edit_out"]).success(
                                         style_clip_choices, clips, wiring["style_clip"]).success(
-                                        render_summary, [clips, wiring["style"], wiring["framing"]],
+                                        render_summary, [clips] + wiring["opts"],
                                         wiring["render_info"])
 
                 with gr.Accordion("🗑️ Hapus proyek", open=False):
@@ -586,6 +603,7 @@ def build_ui():
                             static_columns=[1, 2], interactive=True, wrap=True, max_height=420,
                             label="Transkrip di sekitar klip", elem_classes="sentence-table")
                         title = gr.Textbox(label="Judul")
+                        hook_text = gr.Textbox(label="Teks hook (tampil besar di 3 detik pertama; kosongkan = tanpa hook)")
                         description = gr.Textbox(label="Deskripsi", lines=2)
                         hashtags = gr.Textbox(label="Hashtag", placeholder="#tips #motivasi")
                     with gr.Column(scale=2):
@@ -608,6 +626,10 @@ def build_ui():
                         style = gr.Dropdown(STYLE_CHOICES, value=DEFAULT_PRESET, label="Gaya caption")
                         framing = gr.Dropdown(FRAMING_CHOICES, value="auto", label="Framing")
                         loudnorm = gr.Checkbox(value=True, label="Samakan volume suara (disarankan)")
+                        cut_silence = gr.Checkbox(value=True, label="Hapus jeda diam (video lebih padat)")
+                        cut_fillers = gr.Checkbox(value=True, label="Hapus kata pengisi (eh, em, um, uh...)")
+                        hook_on = gr.Checkbox(value=True, label="Tampilkan hook di 3 detik pertama")
+                        keywords_on = gr.Checkbox(value=True, label="Warnai kata kunci di caption")
                         style_clip = gr.Dropdown([], label="Preview pada klip")
                     style_image = gr.Image(label="Tampilan short", type="filepath", height=520)
                 with gr.Row():
@@ -641,13 +663,15 @@ def build_ui():
 
         # ---------------------------------------------------------- wiring
         edit_in = [project, clips, edit_idx, caption_edits, style, max_len]
-        edit_out = [edit_idx, edit_header, title, description, hashtags, sentences, sentence_table,
+        opt_in = [style, framing, loudnorm, cut_silence, cut_fillers, hook_on, keywords_on]
+        edit_out = [edit_idx, edit_header, title, hook_text, description, hashtags, sentences, sentence_table,
                     clip_info, caption_table, edit_video]
         wiring.update(
             open=[project, clips, caption_edits, edit_idx, renders, analyze_status, url, instructions, num_clips,
-                  min_len, max_len, provider, model, language, style, framing, loudnorm, zip_file, tabs,
+                  min_len, max_len, provider, model, language, style, framing, loudnorm, cut_silence, cut_fillers,
+                  hook_on, keywords_on, zip_file, tabs,
                   job_dir, job_seen],
-            edit_in=edit_in, edit_out=edit_out, style_clip=style_clip, style=style, framing=framing,
+            edit_in=edit_in, edit_out=edit_out, style_clip=style_clip, opts=opt_in,
             render_info=render_info)
 
         refresh = [projects, delete_choice]
@@ -675,7 +699,7 @@ def build_ui():
                        [clips, pick_status])
         to_edit_btn.click(to_edit, clips, [edit_idx, tabs]).success(load_edit, edit_in, edit_out)
 
-        fields = [project, clips, edit_idx, title, description, hashtags]
+        fields = [project, clips, edit_idx, title, hook_text, description, hashtags]
         for btn, delta in ((prev_btn, -1), (next_btn, 1)):
             btn.click(commit_fields, fields, clips).success(
                 partial(step_clip, delta), [clips, edit_idx], edit_idx).success(load_edit, edit_in, edit_out)
@@ -685,19 +709,19 @@ def build_ui():
         caption_table.input(edit_captions, [project, clips, edit_idx, caption_table, caption_edits, style],
                             caption_edits)
         edit_preview_btn.click(commit_fields, fields, clips).success(
-            edit_preview, [project, clips, edit_idx, caption_edits, style, framing], edit_video)
+            edit_preview, [project, clips, edit_idx, caption_edits] + opt_in, edit_video)
         back_pick_btn.click(commit_fields, fields, clips).success(lambda: _go("pick"), None, tabs)
         to_style_btn.click(commit_fields, fields, clips).success(lambda: _go("style"), None, tabs).success(
             style_clip_choices, clips, style_clip)
 
-        preview_in = [project, clips, style_clip, caption_edits, style, framing]
-        for comp in (style, framing, style_clip):
+        preview_in = [project, clips, style_clip, caption_edits] + opt_in
+        for comp in [style_clip] + [c for c in opt_in if c is not loudnorm]:
             comp.change(style_preview, preview_in, style_image)
         back_edit_btn.click(lambda: _go("edit"), None, tabs).success(load_edit, edit_in, edit_out)
         to_render_btn.click(lambda: _go("render"), None, tabs).success(
-            render_summary, [clips, style, framing], render_info)
+            render_summary, [clips] + opt_in, render_info)
 
-        render_btn.click(start_render, [project, clips, caption_edits, style, framing, loudnorm],
+        render_btn.click(start_render, [project, clips, caption_edits] + opt_in,
                          [job_dir, job_seen, render_status])
         retry_render_btn.click(retry_job, job_dir, [job_seen, analyze_status, render_status])
         back_edit2_btn.click(lambda: _go("edit"), None, tabs).success(load_edit, edit_in, edit_out)

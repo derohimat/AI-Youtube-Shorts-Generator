@@ -11,25 +11,25 @@ import re
 PRESETS = {
     "bold-yellow": {
         "label": "Bold yellow (word highlight)", "font": "Anton", "size": 0.072,
-        "color": "FFFFFF", "highlight": "FFE81F", "outline": "000000", "outline_w": 0.0045,
+        "color": "FFFFFF", "highlight": "FFE81F", "keyword": "4ADE80", "outline": "000000", "outline_w": 0.0045,
         "shadow": 0.002, "box": False, "uppercase": True, "max_words": 3, "max_chars": 18,
         "position": 0.30, "pop": True,
     },
     "clean-white": {
         "label": "Clean white (green highlight)", "font": "Anton", "size": 0.062,
-        "color": "FFFFFF", "highlight": "3DFF6E", "outline": "000000", "outline_w": 0.0035,
+        "color": "FFFFFF", "highlight": "3DFF6E", "keyword": "FFE81F", "outline": "000000", "outline_w": 0.0035,
         "shadow": 0.0, "box": False, "uppercase": False, "max_words": 4, "max_chars": 24,
         "position": 0.30, "pop": False,
     },
     "boxed": {
         "label": "Boxed (white on black)", "font": "Anton", "size": 0.052,
-        "color": "FFFFFF", "highlight": "FFD400", "outline": "000000", "outline_w": 0.006,
+        "color": "FFFFFF", "highlight": "FFD400", "keyword": "7DD3FC", "outline": "000000", "outline_w": 0.006,
         "shadow": 0.0, "box": True, "uppercase": False, "max_words": 5, "max_chars": 28,
         "position": 0.28, "pop": False,
     },
     "minimal": {
         "label": "Minimal (sentence, no highlight)", "font": "DejaVu Sans", "size": 0.036,
-        "color": "FFFFFF", "highlight": None, "outline": "000000", "outline_w": 0.0025,
+        "color": "FFFFFF", "highlight": None, "keyword": "FFE81F", "outline": "000000", "outline_w": 0.0025,
         "shadow": 0.0015, "box": False, "uppercase": False, "max_words": 8, "max_chars": 40,
         "position": 0.18, "pop": False,
     },
@@ -122,15 +122,39 @@ def _escape(text):
     return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
-def build_ass(lines, preset=DEFAULT_PRESET, width=1080, height=1920):
-    """Return the ASS document text for the given caption lines."""
+def _norm(word):
+    return re.sub(r"[^\w]", "", word.lower())
+
+
+def keyword_set(keywords):
+    """Normalised single words from AI keywords/phrases (short words are ignored)."""
+    return {w for k in keywords or [] for w in (_norm(x) for x in str(k).split()) if len(w) >= 3 or w.isdigit()}
+
+
+def build_ass(lines, preset=DEFAULT_PRESET, width=1080, height=1920, hook=None, keywords=None, font=None,
+              colors=None):
+    """Return the ASS document text for the given caption lines.
+
+    hook: optional {"text": str, "duration": seconds} shown boxed at the top at the start of the clip.
+    keywords: words to colour with the preset's keyword colour (when not the currently spoken word).
+    font / colors: brand overrides of the preset's font family and {"color", "highlight", "keyword"}.
+    """
     style = PRESETS.get(preset) or PRESETS[DEFAULT_PRESET]
+    base = PRESETS[DEFAULT_PRESET]
+    captions_on = preset != "none" and "size" in style
+    style = dict(style if captions_on else base)
+    if font:
+        style["font"] = font
+    for key, value in (colors or {}).items():
+        if value and key in ("color", "highlight", "keyword") and (key != "highlight" or style.get("highlight")):
+            style[key] = str(value).lstrip("#")
     size = round(height * style["size"])
     outline = max(1, round(height * style["outline_w"]))
     shadow = round(height * style["shadow"])
     margin_v = round(height * style["position"])
     border_style = 3 if style["box"] else 1
     back = _ass_color("000000", 0x30) if style["box"] else _ass_color("000000", 0x80)
+    hook_size = round(min(width, height * 9 / 16) * 0.09)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -141,32 +165,43 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{style['font']},{size},{_ass_color(style['color'])},{_ass_color(style['color'])},{_ass_color(style['outline'])},{back},-1,0,0,0,100,100,0,0,{border_style},{outline},{shadow},2,{round(width * 0.08)},{round(width * 0.08)},{margin_v},1
+Style: Hook,{font or base['font']},{hook_size},{_ass_color("111111")},{_ass_color("111111")},{_ass_color("FFFFFF")},{_ass_color("FFFFFF")},-1,0,0,0,100,100,0,0,3,{max(4, round(hook_size * 0.3))},0,8,{round(width * 0.1)},{round(width * 0.1)},{round(height * 0.1)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-    for line in lines:
+    if hook and str(hook.get("text", "")).strip() and hook.get("duration", 0) > 0:
+        text = _escape(str(hook["text"]).strip())
+        events.append((1, 0.0, float(hook["duration"]), "Hook", r"{\fad(150,250)}" + text))
+    kw = keyword_set(keywords)
+    for line in (lines if captions_on else []):
         words = line.get("words") or [{"w": line["text"], "s": line["start"], "e": line["end"]}]
         texts = [_escape(w["w"].upper() if style["uppercase"] else w["w"]) for w in words]
+        if kw and style.get("keyword"):
+            key = _ass_color(style["keyword"])
+            texts = [f"{{\\c{key}}}{t}{{\\r}}" if _norm(w["w"]) in kw else t for t, w in zip(texts, words)]
         pop = r"{\fscx80\fscy80\t(0,90,\fscx100\fscy100)}" if style["pop"] else ""
         if not style["highlight"]:
-            events.append((line["start"], line["end"], pop + " ".join(texts)))
+            events.append((0, line["start"], line["end"], "Default", pop + " ".join(texts)))
             continue
         # One event per word so the currently spoken word is highlighted.
+        hl = _ass_color(style["highlight"])
+        plain = [_escape(w["w"].upper() if style["uppercase"] else w["w"]) for w in words]
         for k, word in enumerate(words):
             start = line["start"] if k == 0 else word["s"]
             end = words[k + 1]["s"] if k + 1 < len(words) else line["end"]
             if end <= start:
                 continue
-            hl = _ass_color(style["highlight"])
-            parts = [f"{{\\c{hl}}}{t}{{\\r}}" if j == k else t for j, t in enumerate(texts)]
-            events.append((start, end, (pop if k == 0 else "") + " ".join(parts)))
-    body = "\n".join(f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{t}" for s, e, t in events)
+            parts = [f"{{\\c{hl}}}{plain[j]}{{\\r}}" if j == k else t for j, t in enumerate(texts)]
+            events.append((0, start, end, "Default", (pop if k == 0 else "") + " ".join(parts)))
+    body = "\n".join(f"Dialogue: {layer},{_ass_time(s)},{_ass_time(e)},{name},,0,0,0,,{t}"
+                     for layer, s, e, name, t in events)
     return header + body + "\n"
 
 
-def write_ass(path, lines, preset=DEFAULT_PRESET, width=1080, height=1920):
+def write_ass(path, lines, preset=DEFAULT_PRESET, width=1080, height=1920, hook=None, keywords=None, font=None,
+              colors=None):
     with open(path, "w", encoding="utf-8") as f:
-        f.write(build_ass(lines, preset, width, height))
+        f.write(build_ass(lines, preset, width, height, hook=hook, keywords=keywords, font=font, colors=colors))
     return path

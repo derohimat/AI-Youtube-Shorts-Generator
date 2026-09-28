@@ -60,6 +60,9 @@ class Highlight(BaseModel):
     score: int = Field(description="Virality score from 1 (weak) to 10 (excellent)")
     description: str = Field(description="1-2 sentence description for YouTube/TikTok")
     hashtags: List[str] = Field(description="3-6 relevant hashtags without the # sign")
+    keywords: List[str] = Field(default_factory=list,
+                                description="3-6 important words spoken in the clip to emphasize in captions "
+                                            "(exact words from the transcript, e.g. numbers, names, key nouns)")
 
 
 class HighlightList(BaseModel):
@@ -77,6 +80,7 @@ Rules for every clip:
 - Use the exact timestamps from the transcript. Clips must not overlap.
 - Rank by how likely the clip is to go viral; give an honest score 1-10.
 - Write title, description and hashtags in the same language as the transcript.
+- Pick 3-6 keywords per clip: exact words from the clip's transcript that deserve emphasis on screen.
 {instructions}"""
 
 
@@ -148,7 +152,7 @@ _FATAL_ERRORS = {"AuthenticationError", "PermissionDeniedError", "NotFoundError"
 JSON_INSTRUCTIONS = """
 Reply with ONLY a JSON object, no other text, in this exact shape:
 {"clips": [{"start": 12.3, "end": 55.0, "title": "...", "hook": "...", "reason": "...", "score": 8,
-            "description": "...", "hashtags": ["tag1", "tag2"]}]}"""
+            "description": "...", "hashtags": ["tag1", "tag2"], "keywords": ["word1", "word2"]}]}"""
 
 
 def parse_json_clips(text):
@@ -243,10 +247,13 @@ def heuristic_candidates(segments, num_clips, min_len, max_len):
         words = len(joined.split())
         score = words / max(length, 1) + joined.count("?") * 0.3 + joined.count("!") * 0.3
         title = " ".join(first["text"].split()[:8]).rstrip(",.")
+        words_in = [w.strip(".,!?;:\"'") for w in joined.split()]
+        keywords = [w for w in words_in if any(ch.isdigit() for ch in w)]
+        keywords += sorted({w for w in words_in if len(w) >= 7}, key=len, reverse=True)[:4]
         candidates.append({
             "start": first["start"], "end": end, "title": title, "hook": first["text"],
             "reason": "Dense, uninterrupted speech segment", "score": score,
-            "description": joined[:200], "hashtags": ["shorts"],
+            "description": joined[:200], "hashtags": ["shorts"], "keywords": keywords[:6],
         })
     candidates.sort(key=lambda c: c["score"], reverse=True)
     best = max((c["score"] for c in candidates), default=1) or 1
@@ -357,6 +364,7 @@ def find_highlights(transcript, duration, num_clips=5, min_len=20, max_len=60, i
             "score": int(max(1, min(10, round(float(c.get("score") or 5))))),
             "description": (c.get("description") or "").strip(),
             "hashtags": normalize_hashtags(c.get("hashtags")),
+            "keywords": [str(k).strip() for k in (c.get("keywords") or []) if str(k).strip()][:8],
         })
     if exclude:
         clips = [c for c in clips if not any(min(c["end"], b) - max(c["start"], a) > 0.5 * (c["end"] - c["start"])

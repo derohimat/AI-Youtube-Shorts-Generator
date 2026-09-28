@@ -16,7 +16,8 @@ import threading
 import time
 
 from Components import config, media
-from Components.captions import DEFAULT_PRESET, lines_for_clip
+from Components import cuts
+from Components.captions import DEFAULT_PRESET, clip_words, lines_for_clip
 from Components.framing import plan_framing
 from Components.highlights import all_words, find_highlights, snap_clip
 from Components.render import render_preview, render_short, render_still, thumbnail
@@ -338,27 +339,73 @@ def preview_clip(project, clip):
     return path
 
 
-def style_still(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None):
-    """One frame showing the final framing + caption style."""
+# Everything that changes how a short looks. Stored in the session settings and in render jobs.
+DEFAULT_OPTS = dict(style=DEFAULT_PRESET, framing="auto", loudnorm=True, cut_silence=True, cut_fillers=True,
+                    hook=True, keywords=True)
+HOOK_SECONDS = 3.0
+
+
+def resolve_opts(opts=None, **overrides):
+    merged = dict(DEFAULT_OPTS)
+    merged.update({k: v for k, v in (opts or {}).items() if v is not None})
+    merged.update({k: v for k, v in overrides.items() if v is not None})
+    return merged
+
+
+def prepare_render(project, clip, opts=None, lines=None):
+    """Framing plan, cut segments and remapped captions/hook for one clip."""
+    opts = resolve_opts(opts)
+    style = clip.get("style") or opts["style"]
+    framing = clip.get("framing") or opts["framing"]
     plan = plan_framing(project["video_path"], clip["start"], clip["end"], framing,
                         (project["width"], project["height"]))
-    lines = lines if lines is not None else caption_lines(project, clip, style)
-    path = os.path.join(project["work_dir"], "previews", f"style_{clip['start']:.2f}_{style}_{framing}.jpg")
+    if lines is None:
+        lines = caption_lines(project, clip, style)
+    duration = clip["end"] - clip["start"]
+    language = project["transcript"].get("language", "en")
+    segments = cuts.cut_segments(clip_words(project["transcript"], clip["start"], clip["end"]), duration,
+                                 remove_silence=opts["cut_silence"], remove_fillers=opts["cut_fillers"],
+                                 language=language)
+    lines = cuts.remap_lines(lines, segments, drop_fillers=opts["cut_fillers"], language=language)
+    if plan.get("keyframes"):
+        plan = {**plan, "keyframes": cuts.remap_keyframes(plan["keyframes"], segments)}
+    out_duration = cuts.output_duration(segments)
+    hook_text = clip.get("hook_text", clip.get("title", "")) if opts["hook"] else ""
+    return dict(
+        plan=plan, lines=lines, segments=segments, style=style, framing=framing, duration=out_duration,
+        hook={"text": hook_text, "duration": min(HOOK_SECONDS, out_duration)} if hook_text else None,
+        keywords=clip.get("keywords") if opts["keywords"] else None, loudnorm=opts["loudnorm"],
+    )
+
+
+def _render_kwargs(r):
+    return dict(caption_lines=r["lines"], preset=r["style"], segments=r["segments"], hook=r["hook"],
+                keywords=r["keywords"])
+
+
+def _opts_key(clip, opts, lines):
+    return hashlib.sha1(json.dumps([clip["start"], clip["end"], clip.get("hook_text"), clip.get("style"),
+                                    clip.get("framing"), resolve_opts(opts),
+                                    [l["text"] for l in lines or []]], sort_keys=True).encode()).hexdigest()[:10]
+
+
+def style_still(project, clip, opts=None, lines=None):
+    """One frame showing the final framing + caption style (+ hook)."""
+    r = prepare_render(project, clip, opts, lines)
+    path = os.path.join(project["work_dir"], "previews", f"style_{_opts_key(clip, opts, lines)}.jpg")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    return render_still(project["video_path"], clip["start"], clip["end"], plan, path, lines, style)
+    at = min(1.0, r["duration"] / 2)  # hook and first caption line are both visible here
+    return render_still(project["video_path"], clip["start"], clip["end"], r["plan"], path, at=at,
+                        **_render_kwargs(r))
 
 
-def quick_preview(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None):
-    """Fast low-resolution 9:16 preview with the final framing and captions."""
-    lines = lines if lines is not None else caption_lines(project, clip, style)
-    key = hashlib.sha1(json.dumps([clip["start"], clip["end"], style, framing,
-                                   [l["text"] for l in lines]]).encode()).hexdigest()[:10]
-    path = os.path.join(project["work_dir"], "previews", f"short_{key}.mp4")
+def quick_preview(project, clip, opts=None, lines=None):
+    """Fast low-resolution preview with the final framing, cuts, captions and hook."""
+    path = os.path.join(project["work_dir"], "previews", f"short_{_opts_key(clip, opts, lines)}.mp4")
     if not os.path.exists(path):
-        plan = plan_framing(project["video_path"], clip["start"], clip["end"], framing,
-                            (project["width"], project["height"]))
-        render_short(project["video_path"], clip["start"], clip["end"], plan, path, caption_lines=lines,
-                     preset=style, has_audio=project.get("has_audio", True), size=(360, 640), fast=True)
+        r = prepare_render(project, clip, opts, lines)
+        render_short(project["video_path"], clip["start"], clip["end"], r["plan"], path,
+                     has_audio=project.get("has_audio", True), size=(360, 640), fast=True, **_render_kwargs(r))
     return path
 
 
@@ -373,32 +420,30 @@ def project_thumbnail(project):
     return path
 
 
-def render_clip(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None, loudnorm=True,
-                index=None, progress=None):
-    """Render one clip. Returns {"video", "thumbnail", "metadata", "text", "clip"}."""
+def render_clip(project, clip, opts=None, lines=None, index=None, progress=None, **legacy):
+    """Render one clip. Returns {"video", "thumbnail", "metadata", "text", "clip", "framing", "style"}.
+
+    `legacy` accepts style=/framing=/loudnorm= keywords (older callers) as option overrides.
+    """
     progress = progress or _noop
+    opts = resolve_opts(opts, **legacy)
     index = index or clip.get("id", 1)
     out_dir = os.path.join(config.OUTPUT_DIR, project["slug"][:60])
     base = os.path.join(out_dir, f"{index:02d}-{clean_filename(clip.get('title') or 'clip', 50)}")
 
-    progress(0.1, f"Clip {index}: analysing faces / framing ({framing})...")
-    plan = plan_framing(project["video_path"], clip["start"], clip["end"], framing,
-                        (project["width"], project["height"]))
-    if lines is None:
-        lines = caption_lines(project, clip, style)
-
-    progress(0.4, f"Clip {index}: rendering ({plan['mode']}, captions: {style})...")
-    video = render_short(project["video_path"], clip["start"], clip["end"], plan, base + ".mp4",
-                         caption_lines=lines, preset=style, loudnorm=loudnorm,
-                         has_audio=project.get("has_audio", True))
-    thumb = thumbnail(video, base + ".jpg", at=min(0.8, (clip["end"] - clip["start"]) / 2))
+    progress(0.1, f"Clip {index}: analysing faces / framing...")
+    r = prepare_render(project, clip, opts, lines)
+    progress(0.4, f"Clip {index}: rendering ({r['plan']['mode']}, captions: {r['style']})...")
+    video = render_short(project["video_path"], clip["start"], clip["end"], r["plan"], base + ".mp4",
+                         loudnorm=r["loudnorm"], has_audio=project.get("has_audio", True), **_render_kwargs(r))
+    thumb = thumbnail(video, base + ".jpg", at=min(0.8, r["duration"] / 2))
 
     text = metadata_text(clip)
     with open(base + ".txt", "w", encoding="utf-8") as f:
         f.write(text)
     progress(1.0, f"Clip {index}: done -> {video}")
     return {"video": video, "thumbnail": thumb, "metadata": base + ".txt", "text": text,
-            "clip": clip, "framing": plan["mode"], "style": style}
+            "clip": clip, "framing": r["plan"]["mode"], "style": r["style"]}
 
 
 def analyze_project(source, num_clips=5, min_len=15, max_len=60, instructions="", provider=None, model=None,
@@ -422,23 +467,24 @@ def analyze_project(source, num_clips=5, min_len=15, max_len=60, instructions=""
     return project
 
 
-def render_project(project, style=DEFAULT_PRESET, framing="auto", loudnorm=True, progress=None):
+def render_project(project, progress=None, **opts):
     """Render every kept clip of a project using its saved session (clips + caption edits)."""
     from Components.captions import apply_text_edits
     progress = progress or _noop
+    opts = resolve_opts(opts)
     session = load_session(project)
     kept = [c for c in session["clips"] if c.get("keep")]
     if not kept:
         raise ValueError("No clips selected.")
     results = []
     for n, clip in enumerate(kept, 1):
-        lines = caption_lines(project, clip, style)
+        lines = caption_lines(project, clip, clip.get("style") or opts["style"])
         edited = session["caption_edits"].get(str(clip["id"]))
         if edited:
             lines = apply_text_edits(lines, edited)
-        results.append(render_clip(project, clip, style=style, framing=framing, lines=lines, loudnorm=loudnorm,
-                                   index=n, progress=lambda f, m, n=n: progress((n - 1 + f) / len(kept), m)))
-    save_session(project, render_results=results, settings=dict(style=style, framing=framing, loudnorm=loudnorm))
+        results.append(render_clip(project, clip, opts, lines=lines, index=n,
+                                   progress=lambda f, m, n=n: progress((n - 1 + f) / len(kept), m)))
+    save_session(project, render_results=results, settings=opts)
     return results
 
 
