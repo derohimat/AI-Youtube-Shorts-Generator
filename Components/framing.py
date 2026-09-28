@@ -196,20 +196,36 @@ def _two_speakers(samples, src_w):
     return [(float(np.median([f[0] for f in g])), float(np.median([f[1] for f in g]))) for g in (left, right)]
 
 
-def plan_framing(video_path, start, end, mode="auto", src_size=None):
-    """Analyse the clip and return a framing plan for render.py."""
+_SAMPLE_CACHE = {}
+
+
+def _cached_samples(video_path, start, end):
+    """Face samples are the slow part; reuse them when one clip is rendered in several formats."""
+    key = (os.path.abspath(video_path), round(start, 2), round(end, 2))
+    if key not in _SAMPLE_CACHE:
+        if len(_SAMPLE_CACHE) > 32:
+            _SAMPLE_CACHE.pop(next(iter(_SAMPLE_CACHE)))
+        _SAMPLE_CACHE[key] = sample_faces(video_path, start, end)
+    return _SAMPLE_CACHE[key]
+
+
+def plan_framing(video_path, start, end, mode="auto", src_size=None, aspect=9 / 16):
+    """Analyse the clip and return a framing plan for render.py.
+
+    aspect: output width / height (9/16 vertical, 1 square, 4/5 portrait).
+    """
     if mode not in MODES:
         raise ValueError(f"Unknown framing mode '{mode}'. Choose one of: {', '.join(MODES)}")
     src_w, src_h = src_size or (0, 0)
     samples = []
     if mode in ("auto", "track", "split") or not src_w:
-        samples, (src_w, src_h) = sample_faces(video_path, start, end)
+        samples, (src_w, src_h) = _cached_samples(video_path, start, end)
 
-    # Already vertical (or square-ish narrower than 9:16): just fit it.
-    if src_w / max(1, src_h) <= 9 / 16 + 0.01:
+    # Source already as narrow as the target (e.g. a vertical video): just fit it.
+    if src_w / max(1, src_h) <= aspect + 0.01:
         return {"mode": "fit-blur", "src_w": src_w, "src_h": src_h}
 
-    crop_w, crop_h = _even(src_h * 9 / 16), _even(src_h)
+    crop_w, crop_h = _even(src_h * aspect), _even(src_h)
     plan = {"mode": mode, "src_w": src_w, "src_h": src_h, "crop_w": crop_w, "crop_h": crop_h}
 
     with_faces = sum(1 for s in samples if s["faces"])
@@ -221,9 +237,10 @@ def plan_framing(video_path, start, end, mode="auto", src_size=None):
     if mode == "split":
         pair = _two_speakers(samples, src_w)
         if pair:
-            # Each person fills one 9:8 half of the 9:16 frame.
-            half_w = _even(min(src_w / 2, src_h * 9 / 8))
-            half_h = _even(half_w * 8 / 9)
+            # Each person fills one half (top/bottom) of the output frame.
+            half_ratio = 2 * aspect  # width / height of one half, e.g. 9:8 for 9:16
+            half_w = _even(min(src_w / 2, src_h * half_ratio))
+            half_h = _even(half_w / half_ratio)
             boxes = [(int(min(src_w - half_w, max(0, cx - half_w / 2))),
                       int(min(src_h - half_h, max(0, cy - half_h * 0.45)))) for cx, cy in pair]
             return {**plan, "half_w": half_w, "half_h": half_h, "boxes": boxes}

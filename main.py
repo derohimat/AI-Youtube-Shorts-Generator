@@ -3,7 +3,8 @@
 Examples:
     python main.py "https://youtu.be/VIDEO_ID"
     python main.py video.mp4 --clips 3 --max 45 --style clean-white --auto-approve
-    xargs -a urls.txt -I{} python main.py --auto-approve {}
+    python main.py URL1 URL2 URL3 --auto-approve --formats 9:16 1:1
+    xargs -a urls.txt python main.py --auto-approve
 """
 import argparse
 import sys
@@ -15,18 +16,25 @@ from Components.highlights import PROVIDERS
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Turn a long video into vertical shorts.")
-    parser.add_argument("source", nargs="?", help="YouTube URL or local video file")
-    parser.add_argument("--clips", type=int, default=3, help="number of clips to find (default 3)")
+    parser = argparse.ArgumentParser(description="Turn long videos into shorts.")
+    parser.add_argument("sources", nargs="*", help="YouTube URLs and/or local video files")
+    parser.add_argument("--clips", type=int, default=3, help="number of clips to find per video (default 3)")
     parser.add_argument("--min", dest="min_len", type=int, default=20, help="minimum clip length in seconds")
     parser.add_argument("--max", dest="max_len", type=int, default=60, help="maximum clip length in seconds")
     parser.add_argument("--style", default=DEFAULT_PRESET, choices=list(PRESETS), help="caption style")
-    parser.add_argument("--framing", default="auto", choices=MODES, help="how to fit the video in 9:16")
+    parser.add_argument("--framing", default="auto", choices=MODES, help="how to fit the video in the frame")
+    parser.add_argument("--formats", nargs="+", default=["9:16"], choices=list(pipeline.FORMATS),
+                        help="output formats (default 9:16)")
     parser.add_argument("--provider", choices=PROVIDERS, help="LLM provider (default from .env)")
     parser.add_argument("--model", help="LLM model name (default per provider)")
     parser.add_argument("--language", help="spoken language code, e.g. en, id, es (default: auto-detect)")
     parser.add_argument("--instructions", default="", help='what to look for, e.g. "funny moments"')
     parser.add_argument("--no-loudnorm", action="store_true", help="keep the original audio loudness")
+    parser.add_argument("--keep-silence", action="store_true", help="do not cut pauses")
+    parser.add_argument("--keep-fillers", action="store_true", help='do not cut filler sounds ("um", "eh")')
+    parser.add_argument("--no-hook", action="store_true", help="no title overlay in the first seconds")
+    parser.add_argument("--no-keywords", action="store_true", help="no keyword colours in captions")
+    parser.add_argument("--no-brand", action="store_true", help="ignore the brand kit (logo, font, music)")
     parser.add_argument("--auto-approve", action="store_true", help="render all found clips without asking")
     return parser.parse_args(argv)
 
@@ -47,28 +55,51 @@ def choose_clips(clips):
     return [c for c in clips if c["id"] in wanted]
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    source = args.source or input("Enter YouTube video URL or local video file path: ")
+def render_opts(args):
+    return pipeline.resolve_opts(dict(
+        style=args.style, framing=args.framing, loudnorm=not args.no_loudnorm, cut_silence=not args.keep_silence,
+        cut_fillers=not args.keep_fillers, hook=not args.no_hook, keywords=not args.no_keywords,
+        brand=not args.no_brand, formats=args.formats))
 
+
+def process(source, args):
     project = pipeline.prepare(source, language=args.language)
     clips = pipeline.suggest_clips(project, args.clips, args.min_len, args.max_len, args.instructions,
                                    provider=args.provider, model=args.model)
     if not clips:
-        print("No suitable clips found.")
-        return 1
+        print(f"No suitable clips found in {source}.")
+        return False
+    opts = render_opts(args)
     pipeline.save_session(project, clips=clips, caption_edits={}, settings=dict(
         num_clips=args.clips, min_len=args.min_len, max_len=args.max_len, instructions=args.instructions,
-        provider=args.provider, model=args.model, style=args.style, framing=args.framing))
+        provider=args.provider, model=args.model, **opts))
     if not args.auto_approve:
         clips = choose_clips(clips)
-
-    for clip in clips:
-        result = pipeline.render_clip(project, clip, style=args.style, framing=args.framing,
-                                      loudnorm=not args.no_loudnorm)
+    for n, clip in enumerate(clips, 1):
+        result = pipeline.render_clip(project, clip, opts, index=n)
         pipeline.save_session(project, render_results=[result])
-        print(f"\n✓ {result['video']}\n{result['text']}")
-    return 0
+        print(f"\n✓ {', '.join(result['videos'])}\n{result['text']}")
+    return True
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    sources = args.sources or [input("Enter YouTube video URL or local video file path: ")]
+    failed = []
+    for i, source in enumerate(sources, 1):
+        if len(sources) > 1:
+            print(f"\n===== [{i}/{len(sources)}] {source} =====")
+        try:
+            if not process(source, args):
+                failed.append(source)
+        except Exception as e:  # noqa: BLE001 - keep going with the other videos in batch mode
+            if len(sources) == 1:
+                raise
+            print(f"✗ {source}: {type(e).__name__}: {e}")
+            failed.append(source)
+    if failed:
+        print(f"\n{len(failed)} of {len(sources)} video(s) failed: {', '.join(failed)}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

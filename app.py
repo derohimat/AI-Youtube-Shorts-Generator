@@ -44,7 +44,9 @@ CSS = """
 
 # ---------------------------------------------------------------- helpers
 
-OPT_KEYS = ["style", "framing", "loudnorm", "cut_silence", "cut_fillers", "hook", "keywords", "brand"]
+OPT_KEYS = ["style", "framing", "loudnorm", "cut_silence", "cut_fillers", "hook", "keywords", "brand", "formats"]
+FORMAT_CHOICES = [("9:16 (Shorts, TikTok, Reels)", "9:16"), ("1:1 (feed)", "1:1"), ("4:5 (Instagram feed)", "4:5")]
+FOLLOW_GLOBAL = ("Ikuti pengaturan di langkah 5", "")
 
 
 def _opts(*values):
@@ -86,13 +88,18 @@ def _error(e):
 
 
 def _lines(project, clip, style, caption_edits):
-    lines = pipeline.caption_lines(project, clip, style)
+    lines = pipeline.caption_lines(project, clip, clip.get("style") or style)
     edited = (caption_edits or {}).get(str(clip["id"]))
     return apply_text_edits(lines, edited) if edited else lines
 
 
+def _result_files(r):
+    paths = list(r.get("videos") or [r["video"]]) + [r.get("srt"), r["metadata"], r["thumbnail"]]
+    return [p for p in paths if p and os.path.exists(p)]
+
+
 def _zip(results):
-    files = [p for r in results for p in (r["video"], r["metadata"], r["thumbnail"]) if os.path.exists(p)]
+    files = [p for r in results for p in _result_files(r)]
     if not files:
         return None
     path = os.path.join(os.path.dirname(results[0]["video"]), "shorts.zip")
@@ -125,7 +132,7 @@ def open_project(project_id):
     work_dir = os.path.join(config.WORK_DIR, project_id)
     job = jobs.read(work_dir)
     if not os.path.exists(os.path.join(work_dir, "project.json")):
-        keep = (gr.update(),) * 22  # outputs except analyze_status, tabs, job_dir, job_seen
+        keep = (gr.update(),) * 23  # outputs except analyze_status, tabs, job_dir, job_seen
         return keep[:5] + (_job_text(job),) + keep[5:] + (_go("analyze"), work_dir, "")
     try:
         project, session = pipeline.open_project(project_id)
@@ -151,7 +158,7 @@ def open_project(project_id):
         gr.update(choices=MODEL_CHOICES.get(provider, []), value=st.get("model") or DEFAULT_MODELS.get(provider)),
         st.get("language", ""), st.get("style", DEFAULT_PRESET), st.get("framing", "auto"),
         st.get("loudnorm", True), st.get("cut_silence", True), st.get("cut_fillers", True), st.get("hook", True),
-        st.get("keywords", True), st.get("brand", True),
+        st.get("keywords", True), st.get("brand", True), st.get("formats") or ["9:16"],
         _zip(session["renders"]) if session["renders"] else None,
         _go(step), work_dir, seen,
     )
@@ -205,17 +212,41 @@ def _job_text(job):
     return text
 
 
-def start_analyze(url, upload, num_clips, min_len, max_len, instructions, provider, model, language):
-    """Queue download + transcription + clip search in the background."""
-    source = pipeline.import_upload(upload) if upload else (url or "").strip()
-    work_dir, _ = pipeline.project_dir_for(source)
-    params = dict(source=source, num_clips=int(num_clips), min_len=int(min_len), max_len=int(max_len),
-                  instructions=instructions, provider=provider, model=model, language=language)
-    try:
-        job = jobs.submit(work_dir, "analyze", partial(pipeline.analyze_project, **params), params)
-    except RuntimeError as e:
-        raise gr.Error(f"Video ini sedang diproses: {e}")
-    return work_dir, "", _job_text(job)
+def _sources(url, upload):
+    """All sources from the link box (one per line) plus an optional upload."""
+    sources = [line.strip() for line in (url or "").splitlines() if line.strip()]
+    if upload:
+        sources.insert(0, pipeline.import_upload(upload))
+    return list(dict.fromkeys(sources))
+
+
+def start_analyze(url, upload, num_clips, min_len, max_len, instructions, provider, model, language, auto_render,
+                  *opt_values):
+    """Queue download + transcription + clip search (one job per video) in the background."""
+    followed, first_job, skipped = None, None, []
+    sources = _sources(url, upload)
+    for source in sources:
+        work_dir, _ = pipeline.project_dir_for(source)
+        params = dict(source=source, num_clips=int(num_clips), min_len=int(min_len), max_len=int(max_len),
+                      instructions=instructions, provider=provider, model=model, language=language,
+                      auto_render=bool(auto_render), render_opts=_opts(*opt_values) if auto_render else None)
+        try:
+            job = jobs.submit(work_dir, "analyze", partial(pipeline.analyze_project, **params), params)
+        except RuntimeError:
+            skipped.append(source)
+            continue
+        if followed is None:
+            followed, first_job = work_dir, job
+    if followed is None:
+        raise gr.Error("Video ini sedang diproses; lihat progresnya di **0 · Proyek**.")
+    text = _job_text(first_job)
+    total = len(sources) - len(skipped)
+    if total > 1:
+        text += (f"\n\n📦 **{total} video** masuk antrian dan diproses satu per satu. Halaman ini mengikuti video "
+                 f"pertama; progres yang lain terlihat di **0 · Proyek**.")
+    if skipped:
+        text += f"\n\n(Dilewati karena sedang diproses: {len(skipped)})"
+    return followed, "", text
 
 
 def retry_job(job_dir):
@@ -250,6 +281,10 @@ def poll_job(job_dir, seen):
     if job["kind"] == "analyze":
         done = (f"✅ **{project['title']}** ({pipeline.format_time(project['duration'])}, bahasa "
                 f"`{project['transcript']['language']}`): ditemukan **{len(session['clips'])} klip**.")
+        if session["renders"]:  # batch with automatic render
+            return (project, session["clips"], session["caption_edits"], session["renders"],
+                    _zip(session["renders"]), _go("render"), job["finished_at"], done,
+                    f"✅ {len(session['renders'])} klip otomatis di-render.")
         return (project, session["clips"], session["caption_edits"], session["renders"], gr.update(),
                 _go("pick"), job["finished_at"], done, gr.update())
     renders = session["renders"]
@@ -342,12 +377,13 @@ def load_edit(project, clips, idx, caption_edits, style, max_len):
     return (idx, f"### Klip {idx + 1} dari {len(kept)}", clip["title"], clip.get("hook_text", clip["title"]),
             clip.get("description", ""), " ".join(f"#{t}" for t in clip.get("hashtags") or []),
             sentences, _sentence_rows(sentences), _clip_info(clip, max_len),
-            _caption_rows(_lines(project, clip, style, caption_edits)), None, clip.get("framing_offset", 0))
+            _caption_rows(_lines(project, clip, style, caption_edits)), None, clip.get("framing_offset", 0),
+            clip.get("style") or "", clip.get("framing") or "")
 
 
 def load_edit_if_any(project, clips, idx, caption_edits, style, max_len):
     if not project or not _kept(clips):
-        return (gr.update(),) * 12
+        return (gr.update(),) * 14
     return load_edit(project, clips, idx, caption_edits, style, max_len)
 
 
@@ -355,14 +391,16 @@ def _replace(clips, clip):
     return [clip if c["id"] == clip["id"] else c for c in clips]
 
 
-def commit_fields(project, clips, idx, title, hook_text, description, hashtags, framing_offset=0):
-    """Store title/hook/description/hashtags of the clip being edited."""
+def commit_fields(project, clips, idx, title, hook_text, description, hashtags, framing_offset=0, clip_style="",
+                  clip_framing=""):
+    """Store title/hook/description/hashtags and per-clip overrides of the clip being edited."""
     if not project or not _kept(clips):
         return clips
     _, _, clip = _current(clips, idx)
     clip = {**clip, "title": (title or "").strip() or clip["title"], "hook_text": (hook_text or "").strip(),
             "description": (description or "").strip(), "framing_offset": int(framing_offset or 0),
-            "hashtags": normalize_hashtags((hashtags or "").replace(",", " ").split())}
+            "hashtags": normalize_hashtags((hashtags or "").replace(",", " ").split()),
+            "style": clip_style or None, "framing": clip_framing or None}
     clips = _replace(clips, clip)
     _save(project, clips)
     return clips
@@ -388,7 +426,7 @@ def edit_captions(project, clips, idx, table, caption_edits, style):
     """Save caption text fixes (only when they differ from the transcript)."""
     _, _, clip = _current(clips, idx)
     rows = _rows_of(table)
-    generated = pipeline.caption_lines(project, clip, style)
+    generated = pipeline.caption_lines(project, clip, clip.get("style") or style)
     caption_edits = dict(caption_edits or {})
     if [str(r[2]).strip() for r in rows] == [l["text"] for l in generated]:
         caption_edits.pop(str(clip["id"]), None)
@@ -493,6 +531,25 @@ def start_render(project, clips, caption_edits, *opt_values):
     return project["work_dir"], "", _job_text(job)
 
 
+def on_tab_select(clips, style, framing, loudnorm, cut_silence, cut_fillers, hook, keywords, use_brand, formats,
+                  evt: gr.SelectData):
+    """Keep a tab's content fresh when the user opens it directly from the tab bar.
+
+    (Explicit parameters: Gradio only injects `evt` into a named positional parameter, not after *args.)
+    """
+    opt_values = (style, framing, loudnorm, cut_silence, cut_fillers, hook, keywords, use_brand, formats)
+    assert len(opt_values) == len(OPT_KEYS)
+    label = str(evt.value or "")
+    same = (gr.update(),) * 4
+    if label.startswith("0"):
+        return refresh_projects() + (gr.update(), gr.update())
+    if label.startswith("5"):
+        return gr.update(), gr.update(), style_clip_choices(clips), gr.update()
+    if label.startswith("6"):
+        return gr.update(), gr.update(), gr.update(), render_summary(clips, *opt_values)
+    return same
+
+
 # ---------------------------------------------------------------- layout
 
 def build_ui():
@@ -512,7 +569,7 @@ def build_ui():
 
         with gr.Tabs() as tabs:
             # ---------------- 0
-            with gr.Tab("0 · Proyek", id="projects") as tab_projects:
+            with gr.Tab("0 · Proyek", id="projects"):
                 gr.Markdown("Mulai proyek baru, atau lanjutkan video yang pernah dikerjakan "
                             "(tanpa download/transkripsi ulang).", elem_classes="step-hint")
                 new_btn = gr.Button("➕ Proyek baru", variant="primary", size="lg")
@@ -559,12 +616,15 @@ def build_ui():
             with gr.Tab("1 · Sumber", id="source"):
                 gr.Markdown("**Video mana yang mau dipotong, dan untuk platform apa?**", elem_classes="step-hint")
                 with gr.Row():
-                    url = gr.Textbox(label="Link YouTube (atau path video di komputer ini)",
-                                     placeholder="https://www.youtube.com/watch?v=...", scale=3)
+                    url = gr.Textbox(label="Link YouTube atau path video (satu per baris untuk banyak video)",
+                                     placeholder="https://www.youtube.com/watch?v=...", lines=3, max_lines=20,
+                                     scale=3)
                     upload = gr.File(label="...atau upload video", file_types=["video"], type="filepath", scale=2)
                 target = gr.Radio(list(TARGETS), value="YouTube Shorts", label="Untuk platform")
                 instructions = gr.Textbox(label="Cari momen seperti apa? (opsional)",
                                           placeholder="mis. momen lucu, tips praktis, opini kuat")
+                auto_render = gr.Checkbox(label="Langsung render 3 klip terbaik tanpa edit (cocok untuk banyak "
+                                                "video; memakai gaya di langkah 5)")
                 with gr.Accordion("Pengaturan lanjutan", open=False):
                     with gr.Row():
                         num_clips = gr.Slider(1, 10, value=5, step=1, label="Jumlah klip")
@@ -644,7 +704,12 @@ def build_ui():
                         framing_offset = gr.Slider(-50, 50, value=0, step=5,
                                                    label="Geser frame (− kiri · + kanan), untuk mode ikuti wajah / "
                                                          "potong tengah")
-                        edit_preview_btn = gr.Button("▶ Buat preview 9:16")
+                        with gr.Row():
+                            clip_style = gr.Dropdown([FOLLOW_GLOBAL] + STYLE_CHOICES, value="",
+                                                     label="Gaya caption klip ini")
+                            clip_framing = gr.Dropdown([FOLLOW_GLOBAL] + FRAMING_CHOICES, value="",
+                                                       label="Framing klip ini")
+                        edit_preview_btn = gr.Button("▶ Buat preview")
                 caption_table = gr.Dataframe(headers=["Mulai", "Selesai", "Teks caption"],
                                              datatype=["number", "number", "str"], static_columns=[0, 1],
                                              interactive=True, wrap=True, max_height=300,
@@ -667,6 +732,8 @@ def build_ui():
                         hook_on = gr.Checkbox(value=True, label="Tampilkan hook di 3 detik pertama")
                         keywords_on = gr.Checkbox(value=True, label="Warnai kata kunci di caption")
                         use_brand = gr.Checkbox(value=True, label="Pakai brand kit (logo, font, warna, musik)")
+                        formats = gr.CheckboxGroup(FORMAT_CHOICES, value=["9:16"],
+                                                   label="Format video (bisa lebih dari satu)")
                         style_clip = gr.Dropdown([], label="Preview pada klip")
                     style_image = gr.Image(label="Tampilan short", type="filepath", height=520)
                 with gr.Accordion("🎨 Brand kit (berlaku untuk semua proyek)", open=False):
@@ -719,6 +786,8 @@ def build_ui():
                                     gr.Video(item["video"], show_label=False, height=420)
                                     gr.Textbox(item["text"], label="Judul, deskripsi & hashtag", lines=6,
                                                buttons=["copy"])
+                                    gr.File(_result_files(item), file_count="multiple",
+                                            label="File (video per format, .srt, teks, thumbnail)")
 
                 with gr.Row():
                     back_edit2_btn = gr.Button("✏️ Edit klip lagi")
@@ -726,20 +795,21 @@ def build_ui():
 
         # ---------------------------------------------------------- wiring
         edit_in = [project, clips, edit_idx, caption_edits, style, max_len]
-        opt_in = [style, framing, loudnorm, cut_silence, cut_fillers, hook_on, keywords_on, use_brand]
+        opt_in = [style, framing, loudnorm, cut_silence, cut_fillers, hook_on, keywords_on, use_brand, formats]
         edit_out = [edit_idx, edit_header, title, hook_text, description, hashtags, sentences, sentence_table,
-                    clip_info, caption_table, edit_video, framing_offset]
+                    clip_info, caption_table, edit_video, framing_offset, clip_style, clip_framing]
         wiring.update(
             open=[project, clips, caption_edits, edit_idx, renders, analyze_status, url, instructions, num_clips,
                   min_len, max_len, provider, model, language, style, framing, loudnorm, cut_silence, cut_fillers,
-                  hook_on, keywords_on, use_brand, zip_file, tabs,
+                  hook_on, keywords_on, use_brand, formats, zip_file, tabs,
                   job_dir, job_seen],
             edit_in=edit_in, edit_out=edit_out, style_clip=style_clip, opts=opt_in,
             render_info=render_info)
 
         refresh = [projects, delete_choice]
         demo.load(refresh_projects, None, refresh)
-        tab_projects.select(refresh_projects, None, refresh)
+        # Tabs.select fires for every tab click (Tab.select does not in Gradio 6): refresh what the tab shows.
+        tabs.select(on_tab_select, [clips] + opt_in, refresh + [style_clip, render_info])
         delete_btn.click(delete_project, [delete_choice, delete_confirm], refresh + [delete_confirm])
         new_btn.click(new_project, None, [project, clips, caption_edits, edit_idx, renders, analyze_status,
                                           url, upload, instructions, zip_file, tabs, job_dir, job_seen])
@@ -747,7 +817,8 @@ def build_ui():
         target.change(apply_target, target, [min_len, max_len, num_clips])
         provider.input(models_for, provider, model)
         analyze_btn.click(check_source, [url, upload, min_len, max_len], [tabs, analyze_status]).success(
-            start_analyze, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language],
+            start_analyze, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language,
+                            auto_render] + opt_in,
             [job_dir, job_seen, analyze_status])
         retry_analyze_btn.click(retry_job, job_dir, [job_seen, analyze_status, render_status])
         ai_test_btn.click(check_ai, [provider, model], ai_test_result)
@@ -762,7 +833,8 @@ def build_ui():
                        [clips, pick_status])
         to_edit_btn.click(to_edit, clips, [edit_idx, tabs]).success(load_edit, edit_in, edit_out)
 
-        fields = [project, clips, edit_idx, title, hook_text, description, hashtags, framing_offset]
+        fields = [project, clips, edit_idx, title, hook_text, description, hashtags, framing_offset, clip_style,
+                  clip_framing]
         for btn, delta in ((prev_btn, -1), (next_btn, 1)):
             btn.click(commit_fields, fields, clips).success(
                 partial(step_clip, delta), [clips, edit_idx], edit_idx).success(load_edit, edit_in, edit_out)
@@ -792,6 +864,10 @@ def build_ui():
             event = comp.release if isinstance(comp, gr.Slider) else comp.input
             event(brand_settings, brand_controls, brand_info).success(**refresh_style)
         framing_offset.release(commit_fields, fields, clips)
+        for comp in (clip_style, clip_framing):
+            comp.input(commit_fields, fields, clips).success(
+                lambda p, c, i, e, st: _caption_rows(_lines(p, _current(c, i)[2], st, e)),
+                [project, clips, edit_idx, caption_edits, style], caption_table)
         back_edit_btn.click(lambda: _go("edit"), None, tabs).success(load_edit, edit_in, edit_out)
         to_render_btn.click(lambda: _go("render"), None, tabs).success(
             render_summary, [clips] + opt_in, render_info)

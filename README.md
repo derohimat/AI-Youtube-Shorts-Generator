@@ -94,6 +94,10 @@ Open **http://127.0.0.1:7860**. The page is a step-by-step wizard (in Indonesian
 - **Background music**: loops for the whole short and automatically gets quieter while someone speaks.
 Untick *Pakai brand kit* to render without it. Per clip, step 4 · Edit also has a **Geser frame** slider to move the crop left/right when face tracking frames the wrong spot.
 
+**Formats & subtitles.** In step 5 · Gaya you can render **9:16** (Shorts/TikTok/Reels), **1:1** and **4:5** (Instagram feed) at the same time. The framing is recalculated for each format, and the files are named `01-title.mp4`, `01-title_1x1.mp4`, `01-title_4x5.mp4`. Each clip also gets an `.srt` subtitle file (matching the cut timing) for platforms where you upload captions separately. In step 4 · Edit, one clip can use a different caption style or framing than the rest.
+
+**Many videos at once.** Paste several links in step 1, one per line. Each video is analysed in the background queue, one after another, and appears on the project page with its progress. Tick *Langsung render 3 klip terbaik tanpa edit* to get finished shorts for every video without opening each project; the style from step 5 is used.
+
 **Background processing.** Analysis and rendering run in the background, so you can close the page and come back later: the project card shows the progress (for example "⏳ Analisis 45%"). If the server restarts mid-job, the job is marked *terhenti* (interrupted); open the project and click **🔄 Coba lagi** to retry.
 
 **Before a long run**, open *Pengaturan lanjutan* and click **🔌 Tes koneksi AI**. It checks your API key, base URL (e.g. paas.id) and model name in a few seconds.
@@ -108,14 +112,18 @@ Uploaded videos are copied into `work/uploads/` so projects can be reopened afte
 ./run.sh "https://youtu.be/VIDEO_ID"                         # lists clips, you pick numbers
 ./run.sh video.mp4 --clips 5 --min 15 --max 45 --style clean-white --framing auto
 ./run.sh "https://youtu.be/VIDEO_ID" --auto-approve          # render all found clips
+./run.sh video.mp4 --formats 9:16 1:1 4:5 --keep-silence      # several formats, don't cut pauses
 ./run.sh --help                                              # all options
 ```
 
-Batch processing:
+Batch processing (several sources in one run; a failing video doesn't stop the others):
 
 ```bash
-xargs -a urls.txt -I{} ./run.sh --auto-approve {}
+./run.sh --auto-approve URL1 URL2 video3.mp4
+xargs -a urls.txt ./run.sh --auto-approve
 ```
+
+Other options: `--keep-fillers`, `--no-hook`, `--no-keywords`, `--no-brand`, `--no-loudnorm`.
 
 ### Docker
 

@@ -17,7 +17,7 @@ import time
 
 from Components import config, media
 from Components import brand, cuts
-from Components.captions import DEFAULT_PRESET, clip_words, lines_for_clip
+from Components.captions import DEFAULT_PRESET, clip_words, lines_for_clip, write_srt
 from Components.framing import plan_framing
 from Components.highlights import all_words, find_highlights, snap_clip
 from Components.render import render_preview, render_short, render_still, thumbnail
@@ -147,6 +147,7 @@ def _save_session(project, clips, caption_edits, settings, render_results):
         clip = result["clip"]
         session["renders"] = [r for r in session["renders"] if r["clip_id"] != clip["id"]] + [{
             "clip_id": clip["id"], "title": clip.get("title", ""), "video": result["video"],
+            "videos": result.get("videos") or [result["video"]], "srt": result.get("srt"),
             "metadata": result["metadata"], "thumbnail": result["thumbnail"], "text": result["text"],
             "style": result.get("style"), "framing": result.get("framing"), "rendered_at": now,
         }]
@@ -341,7 +342,21 @@ def preview_clip(project, clip):
 
 # Everything that changes how a short looks. Stored in the session settings and in render jobs.
 DEFAULT_OPTS = dict(style=DEFAULT_PRESET, framing="auto", loudnorm=True, cut_silence=True, cut_fillers=True,
-                    hook=True, keywords=True, brand=True)
+                    hook=True, keywords=True, brand=True, formats=["9:16"])
+FORMATS = {"9:16": 9 / 16, "1:1": 1.0, "4:5": 4 / 5}
+
+
+def format_size(fmt, width=None):
+    """Output (width, height) for a format like "1:1"; 9:16 uses OUTPUT_WIDTH x OUTPUT_HEIGHT."""
+    if fmt == "9:16" and width is None:
+        return config.OUTPUT_WIDTH, config.OUTPUT_HEIGHT
+    width = width or config.OUTPUT_WIDTH
+    return width, int(round(width / FORMATS[fmt] / 2) * 2)
+
+
+def _formats(opts):
+    chosen = [f for f in (opts.get("formats") or []) if f in FORMATS]
+    return list(dict.fromkeys(chosen)) or ["9:16"]
 HOOK_SECONDS = 3.0
 
 
@@ -352,13 +367,13 @@ def resolve_opts(opts=None, **overrides):
     return merged
 
 
-def prepare_render(project, clip, opts=None, lines=None):
-    """Framing plan, cut segments and remapped captions/hook for one clip."""
+def prepare_render(project, clip, opts=None, lines=None, fmt="9:16"):
+    """Framing plan, cut segments and remapped captions/hook for one clip in one output format."""
     opts = resolve_opts(opts)
     style = clip.get("style") or opts["style"]
     framing = clip.get("framing") or opts["framing"]
     plan = plan_framing(project["video_path"], clip["start"], clip["end"], framing,
-                        (project["width"], project["height"]))
+                        (project["width"], project["height"]), aspect=FORMATS[fmt])
     if lines is None:
         lines = caption_lines(project, clip, style)
     duration = clip["end"] - clip["start"]
@@ -375,7 +390,7 @@ def prepare_render(project, clip, opts=None, lines=None):
         plan=plan, lines=lines, segments=segments, style=style, framing=framing, duration=out_duration,
         hook={"text": hook_text, "duration": min(HOOK_SECONDS, out_duration)} if hook_text else None,
         keywords=clip.get("keywords") if opts["keywords"] else None, loudnorm=opts["loudnorm"],
-        brand=brand.render_kwargs(use=opts["brand"]),
+        brand=brand.render_kwargs(use=opts["brand"]), format=fmt, size=format_size(fmt),
     )
 
 
@@ -390,7 +405,7 @@ def _shift(plan, offset_percent):
 
 def _render_kwargs(r, video=True):
     kwargs = dict(caption_lines=r["lines"], preset=r["style"], segments=r["segments"], hook=r["hook"],
-                  keywords=r["keywords"], **r["brand"])
+                  keywords=r["keywords"], size=r["size"], **r["brand"])
     if not video:
         kwargs.pop("music", None)
     return kwargs
@@ -405,7 +420,7 @@ def _opts_key(clip, opts, lines):
 
 def style_still(project, clip, opts=None, lines=None):
     """One frame showing the final framing + caption style (+ hook)."""
-    r = prepare_render(project, clip, opts, lines)
+    r = prepare_render(project, clip, opts, lines, fmt=_formats(resolve_opts(opts))[0])
     path = os.path.join(project["work_dir"], "previews", f"style_{_opts_key(clip, opts, lines)}.jpg")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     at = min(1.0, r["duration"] / 2)  # hook and first caption line are both visible here
@@ -417,9 +432,11 @@ def quick_preview(project, clip, opts=None, lines=None):
     """Fast low-resolution preview with the final framing, cuts, captions and hook."""
     path = os.path.join(project["work_dir"], "previews", f"short_{_opts_key(clip, opts, lines)}.mp4")
     if not os.path.exists(path):
-        r = prepare_render(project, clip, opts, lines)
+        fmt = _formats(resolve_opts(opts))[0]
+        r = prepare_render(project, clip, opts, lines, fmt=fmt)
+        r["size"] = format_size(fmt, width=360)
         render_short(project["video_path"], clip["start"], clip["end"], r["plan"], path,
-                     has_audio=project.get("has_audio", True), size=(360, 640), fast=True, **_render_kwargs(r))
+                     has_audio=project.get("has_audio", True), fast=True, **_render_kwargs(r))
     return path
 
 
@@ -445,25 +462,40 @@ def render_clip(project, clip, opts=None, lines=None, index=None, progress=None,
     out_dir = os.path.join(config.OUTPUT_DIR, project["slug"][:60])
     base = os.path.join(out_dir, f"{index:02d}-{clean_filename(clip.get('title') or 'clip', 50)}")
 
-    progress(0.1, f"Clip {index}: analysing faces / framing...")
-    r = prepare_render(project, clip, opts, lines)
-    progress(0.4, f"Clip {index}: rendering ({r['plan']['mode']}, captions: {r['style']})...")
-    video = render_short(project["video_path"], clip["start"], clip["end"], r["plan"], base + ".mp4",
-                         loudnorm=r["loudnorm"], has_audio=project.get("has_audio", True), **_render_kwargs(r))
+    formats = _formats(opts)
+    videos = []
+    for k, fmt in enumerate(formats):
+        share = 1 / len(formats)
+        progress(k * share + 0.1 * share, f"Clip {index}: framing {fmt}...")
+        r = prepare_render(project, clip, opts, lines, fmt=fmt)
+        progress(k * share + 0.3 * share, f"Clip {index}: rendering {fmt} ({r['plan']['mode']}, {r['style']})...")
+        suffix = "" if fmt == "9:16" else "_" + fmt.replace(":", "x")
+        videos.append(render_short(project["video_path"], clip["start"], clip["end"], r["plan"],
+                                   base + suffix + ".mp4", loudnorm=r["loudnorm"],
+                                   has_audio=project.get("has_audio", True), **_render_kwargs(r)))
+    video = videos[0]
     thumb = thumbnail(video, base + ".jpg", at=min(0.8, r["duration"] / 2))
+    srt = write_srt(base + ".srt", r["lines"])
 
     text = metadata_text(clip)
     with open(base + ".txt", "w", encoding="utf-8") as f:
         f.write(text)
     progress(1.0, f"Clip {index}: done -> {video}")
-    return {"video": video, "thumbnail": thumb, "metadata": base + ".txt", "text": text,
-            "clip": clip, "framing": r["plan"]["mode"], "style": r["style"]}
+    return {"video": video, "videos": videos, "formats": formats, "srt": srt, "thumbnail": thumb,
+            "metadata": base + ".txt", "text": text, "clip": clip, "framing": r["plan"]["mode"],
+            "style": r["style"]}
 
 
 def analyze_project(source, num_clips=5, min_len=15, max_len=60, instructions="", provider=None, model=None,
-                    language=None, progress=None):
-    """Download + transcribe + find clips + prepare card previews; everything saved to the session."""
+                    language=None, auto_render=False, render_opts=None, progress=None):
+    """Download + transcribe + find clips + prepare card previews; everything saved to the session.
+
+    auto_render=True also renders the pre-selected best clips with `render_opts` (batch mode).
+    """
     progress = progress or _noop
+    if auto_render:
+        outer = progress
+        progress = lambda f, m: outer(f * 0.5, m)  # noqa: E731 - second half is the render
     project = prepare(source, progress=lambda f, m: progress(f * 0.6, m), language=language or None)
     clips = suggest_clips(project, int(num_clips), int(min_len), int(max_len), instructions, provider=provider,
                           model=(model or "").strip() or None, progress=lambda f, m: progress(0.6 + f * 0.2, m))
@@ -478,6 +510,8 @@ def analyze_project(source, num_clips=5, min_len=15, max_len=60, instructions=""
         num_clips=num_clips, min_len=min_len, max_len=max_len, instructions=instructions,
         provider=provider, model=model, language=language))
     progress(1.0, f"Found {len(clips)} clips")
+    if auto_render:
+        render_project(project, progress=lambda f, m: outer(0.5 + f * 0.5, m), **(render_opts or {}))
     return project
 
 

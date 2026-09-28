@@ -148,13 +148,14 @@ def build_ass(lines, preset=DEFAULT_PRESET, width=1080, height=1920, hook=None, 
     for key, value in (colors or {}).items():
         if value and key in ("color", "highlight", "keyword") and (key != "highlight" or style.get("highlight")):
             style[key] = str(value).lstrip("#")
-    size = round(height * style["size"])
-    outline = max(1, round(height * style["outline_w"]))
-    shadow = round(height * style["shadow"])
+    ref = width * 16 / 9  # sizes are defined for 9:16; scale by width so 1:1 and 4:5 look the same
+    size = round(ref * style["size"])
+    outline = max(1, round(ref * style["outline_w"]))
+    shadow = round(ref * style["shadow"])
     margin_v = round(height * style["position"])
     border_style = 3 if style["box"] else 1
     back = _ass_color("000000", 0x30) if style["box"] else _ass_color("000000", 0x80)
-    hook_size = round(min(width, height * 9 / 16) * 0.09)
+    hook_size = round(width * 0.09)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -198,6 +199,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     body = "\n".join(f"Dialogue: {layer},{_ass_time(s)},{_ass_time(e)},{name},,0,0,0,,{t}"
                      for layer, s, e, name, t in events)
     return header + body + "\n"
+
+
+def _srt_time(seconds):
+    ms = int(round(max(0.0, seconds) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def build_srt(lines):
+    """Plain subtitles (one block per caption line) for uploading captions separately."""
+    blocks = [f"{i}\n{_srt_time(l['start'])} --> {_srt_time(l['end'])}\n{l['text']}\n"
+              for i, l in enumerate(lines, 1)]
+    return "\n".join(blocks)
+
+
+def write_srt(path, lines):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(build_srt(lines))
+    return path
 
 
 def write_ass(path, lines, preset=DEFAULT_PRESET, width=1080, height=1920, hook=None, keywords=None, font=None,
