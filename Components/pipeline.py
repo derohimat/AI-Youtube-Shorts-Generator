@@ -16,7 +16,7 @@ import threading
 import time
 
 from Components import config, media
-from Components import cuts
+from Components import brand, cuts
 from Components.captions import DEFAULT_PRESET, clip_words, lines_for_clip
 from Components.framing import plan_framing
 from Components.highlights import all_words, find_highlights, snap_clip
@@ -341,7 +341,7 @@ def preview_clip(project, clip):
 
 # Everything that changes how a short looks. Stored in the session settings and in render jobs.
 DEFAULT_OPTS = dict(style=DEFAULT_PRESET, framing="auto", loudnorm=True, cut_silence=True, cut_fillers=True,
-                    hook=True, keywords=True)
+                    hook=True, keywords=True, brand=True)
 HOOK_SECONDS = 3.0
 
 
@@ -368,25 +368,39 @@ def prepare_render(project, clip, opts=None, lines=None):
                                  language=language)
     lines = cuts.remap_lines(lines, segments, drop_fillers=opts["cut_fillers"], language=language)
     if plan.get("keyframes"):
-        plan = {**plan, "keyframes": cuts.remap_keyframes(plan["keyframes"], segments)}
+        plan = {**plan, "keyframes": cuts.remap_keyframes(_shift(plan, clip.get("framing_offset", 0)), segments)}
     out_duration = cuts.output_duration(segments)
     hook_text = clip.get("hook_text", clip.get("title", "")) if opts["hook"] else ""
     return dict(
         plan=plan, lines=lines, segments=segments, style=style, framing=framing, duration=out_duration,
         hook={"text": hook_text, "duration": min(HOOK_SECONDS, out_duration)} if hook_text else None,
         keywords=clip.get("keywords") if opts["keywords"] else None, loudnorm=opts["loudnorm"],
+        brand=brand.render_kwargs(use=opts["brand"]),
     )
 
 
-def _render_kwargs(r):
-    return dict(caption_lines=r["lines"], preset=r["style"], segments=r["segments"], hook=r["hook"],
-                keywords=r["keywords"])
+def _shift(plan, offset_percent):
+    """Move the crop window left/right by a percentage of its width (manual framing fix)."""
+    if not offset_percent:
+        return plan["keyframes"]
+    max_x = max(0, plan["src_w"] - plan["crop_w"])
+    shift = float(offset_percent) / 100 * plan["crop_w"]
+    return [(t, int(min(max_x, max(0, x + shift)))) for t, x in plan["keyframes"]]
+
+
+def _render_kwargs(r, video=True):
+    kwargs = dict(caption_lines=r["lines"], preset=r["style"], segments=r["segments"], hook=r["hook"],
+                  keywords=r["keywords"], **r["brand"])
+    if not video:
+        kwargs.pop("music", None)
+    return kwargs
 
 
 def _opts_key(clip, opts, lines):
     return hashlib.sha1(json.dumps([clip["start"], clip["end"], clip.get("hook_text"), clip.get("style"),
-                                    clip.get("framing"), resolve_opts(opts),
-                                    [l["text"] for l in lines or []]], sort_keys=True).encode()).hexdigest()[:10]
+                                    clip.get("framing"), clip.get("framing_offset"), resolve_opts(opts),
+                                    brand.fingerprint(), [l["text"] for l in lines or []]],
+                                   sort_keys=True).encode()).hexdigest()[:10]
 
 
 def style_still(project, clip, opts=None, lines=None):
@@ -396,7 +410,7 @@ def style_still(project, clip, opts=None, lines=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     at = min(1.0, r["duration"] / 2)  # hook and first caption line are both visible here
     return render_still(project["video_path"], clip["start"], clip["end"], r["plan"], path, at=at,
-                        **_render_kwargs(r))
+                        **_render_kwargs(r, video=False))
 
 
 def quick_preview(project, clip, opts=None, lines=None):

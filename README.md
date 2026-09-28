@@ -87,6 +87,13 @@ Open **http://127.0.0.1:7860**. The page is a step-by-step wizard (in Indonesian
 - **Cut silences and filler sounds** ("um", "uh", "eh", "em"...). Pauses longer than 0.6 s and filler sounds are removed, so the short is tighter; captions and camera moves follow the new timing. Real words are never cut.
 - **Keyword colors**: the AI marks 3-6 important words per clip (numbers, names, key nouns) and the captions show them in an accent color.
 
+**Brand kit** (step 5 · Gaya → *Brand kit*, shared by all projects, stored in `work/brand.json`):
+- **Logo / watermark**: a PNG in any corner, with size and transparency.
+- **Caption font**: upload a `.ttf`/`.otf`.
+- **Brand colors**: caption text, spoken word and keyword colors.
+- **Background music**: loops for the whole short and automatically gets quieter while someone speaks.
+Untick *Pakai brand kit* to render without it. Per clip, step 4 · Edit also has a **Geser frame** slider to move the crop left/right when face tracking frames the wrong spot.
+
 **Background processing.** Analysis and rendering run in the background, so you can close the page and come back later: the project card shows the progress (for example "⏳ Analisis 45%"). If the server restarts mid-job, the job is marked *terhenti* (interrupted); open the project and click **🔄 Coba lagi** to retry.
 
 **Before a long run**, open *Pengaturan lanjutan* and click **🔌 Tes koneksi AI**. It checks your API key, base URL (e.g. paas.id) and model name in a few seconds.

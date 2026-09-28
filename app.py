@@ -12,7 +12,7 @@ from functools import partial
 
 import gradio as gr
 
-from Components import config, jobs, pipeline
+from Components import brand, config, jobs, pipeline
 from Components.captions import DEFAULT_PRESET, PRESETS, apply_text_edits
 from Components.framing import MODES
 from Components.highlights import DEFAULT_MODELS, MODEL_CHOICES, PROVIDERS, normalize_hashtags
@@ -44,7 +44,7 @@ CSS = """
 
 # ---------------------------------------------------------------- helpers
 
-OPT_KEYS = ["style", "framing", "loudnorm", "cut_silence", "cut_fillers", "hook", "keywords"]
+OPT_KEYS = ["style", "framing", "loudnorm", "cut_silence", "cut_fillers", "hook", "keywords", "brand"]
 
 
 def _opts(*values):
@@ -125,7 +125,7 @@ def open_project(project_id):
     work_dir = os.path.join(config.WORK_DIR, project_id)
     job = jobs.read(work_dir)
     if not os.path.exists(os.path.join(work_dir, "project.json")):
-        keep = (gr.update(),) * 21  # outputs except analyze_status, tabs, job_dir, job_seen
+        keep = (gr.update(),) * 22  # outputs except analyze_status, tabs, job_dir, job_seen
         return keep[:5] + (_job_text(job),) + keep[5:] + (_go("analyze"), work_dir, "")
     try:
         project, session = pipeline.open_project(project_id)
@@ -151,7 +151,8 @@ def open_project(project_id):
         gr.update(choices=MODEL_CHOICES.get(provider, []), value=st.get("model") or DEFAULT_MODELS.get(provider)),
         st.get("language", ""), st.get("style", DEFAULT_PRESET), st.get("framing", "auto"),
         st.get("loudnorm", True), st.get("cut_silence", True), st.get("cut_fillers", True), st.get("hook", True),
-        st.get("keywords", True), _zip(session["renders"]) if session["renders"] else None,
+        st.get("keywords", True), st.get("brand", True),
+        _zip(session["renders"]) if session["renders"] else None,
         _go(step), work_dir, seen,
     )
 
@@ -341,12 +342,12 @@ def load_edit(project, clips, idx, caption_edits, style, max_len):
     return (idx, f"### Klip {idx + 1} dari {len(kept)}", clip["title"], clip.get("hook_text", clip["title"]),
             clip.get("description", ""), " ".join(f"#{t}" for t in clip.get("hashtags") or []),
             sentences, _sentence_rows(sentences), _clip_info(clip, max_len),
-            _caption_rows(_lines(project, clip, style, caption_edits)), None)
+            _caption_rows(_lines(project, clip, style, caption_edits)), None, clip.get("framing_offset", 0))
 
 
 def load_edit_if_any(project, clips, idx, caption_edits, style, max_len):
     if not project or not _kept(clips):
-        return (gr.update(),) * 11
+        return (gr.update(),) * 12
     return load_edit(project, clips, idx, caption_edits, style, max_len)
 
 
@@ -354,13 +355,13 @@ def _replace(clips, clip):
     return [clip if c["id"] == clip["id"] else c for c in clips]
 
 
-def commit_fields(project, clips, idx, title, hook_text, description, hashtags):
+def commit_fields(project, clips, idx, title, hook_text, description, hashtags, framing_offset=0):
     """Store title/hook/description/hashtags of the clip being edited."""
     if not project or not _kept(clips):
         return clips
     _, _, clip = _current(clips, idx)
     clip = {**clip, "title": (title or "").strip() or clip["title"], "hook_text": (hook_text or "").strip(),
-            "description": (description or "").strip(),
+            "description": (description or "").strip(), "framing_offset": int(framing_offset or 0),
             "hashtags": normalize_hashtags((hashtags or "").replace(",", " ").split())}
     clips = _replace(clips, clip)
     _save(project, clips)
@@ -429,6 +430,38 @@ def style_preview(project, clips, clip_id, caption_edits, *opt_values):
         raise _error(e)
     _save(project, **opts)
     return still
+
+
+def _brand_info(data=None):
+    data = data or brand.load()
+    parts = [
+        f"Logo: {'✅ ' + os.path.basename(data['logo']['path']) if data['logo'].get('path') else '—'}",
+        f"Font: {'✅ ' + data['font']['family'] if data['font'].get('family') else 'bawaan preset'}",
+        f"Musik: {'✅ ' + os.path.basename(data['music']['path']) if data['music'].get('path') else '—'}",
+    ]
+    return " · ".join(parts)
+
+
+def load_brand():
+    d = brand.load()
+    c = d["colors"]
+    return (d["logo"]["position"], d["logo"]["size"] * 100, d["logo"]["opacity"], c["enabled"], c["color"],
+            c["highlight"], c["keyword"], d["music"]["volume"] * 100, _brand_info(d))
+
+
+def brand_upload(kind, path):
+    try:
+        {"logo": brand.set_logo, "font": brand.set_font, "music": brand.set_music}[kind](path)
+    except Exception as e:
+        raise _error(e)
+    return _brand_info(), None
+
+
+def brand_settings(position, size, opacity, colors_on, color, highlight, keyword, volume):
+    brand.update("logo", position=position, size=float(size) / 100, opacity=float(opacity))
+    brand.update("colors", enabled=bool(colors_on), color=color, highlight=highlight, keyword=keyword)
+    brand.update("music", volume=float(volume) / 100)
+    return _brand_info()
 
 
 # ---------------------------------------------------------------- 6. render
@@ -608,6 +641,9 @@ def build_ui():
                         hashtags = gr.Textbox(label="Hashtag", placeholder="#tips #motivasi")
                     with gr.Column(scale=2):
                         edit_video = gr.Video(label="Preview 9:16", height=480)
+                        framing_offset = gr.Slider(-50, 50, value=0, step=5,
+                                                   label="Geser frame (− kiri · + kanan), untuk mode ikuti wajah / "
+                                                         "potong tengah")
                         edit_preview_btn = gr.Button("▶ Buat preview 9:16")
                 caption_table = gr.Dataframe(headers=["Mulai", "Selesai", "Teks caption"],
                                              datatype=["number", "number", "str"], static_columns=[0, 1],
@@ -630,8 +666,35 @@ def build_ui():
                         cut_fillers = gr.Checkbox(value=True, label="Hapus kata pengisi (eh, em, um, uh...)")
                         hook_on = gr.Checkbox(value=True, label="Tampilkan hook di 3 detik pertama")
                         keywords_on = gr.Checkbox(value=True, label="Warnai kata kunci di caption")
+                        use_brand = gr.Checkbox(value=True, label="Pakai brand kit (logo, font, warna, musik)")
                         style_clip = gr.Dropdown([], label="Preview pada klip")
                     style_image = gr.Image(label="Tampilan short", type="filepath", height=520)
+                with gr.Accordion("🎨 Brand kit (berlaku untuk semua proyek)", open=False):
+                    brand_info = gr.Markdown()
+                    with gr.Row():
+                        with gr.Column():
+                            logo_file = gr.File(label="Logo / watermark (PNG transparan)",
+                                                file_types=[".png", ".jpg", ".jpeg", ".webp"], type="filepath")
+                            logo_clear = gr.Button("Hapus logo", size="sm")
+                            logo_position = gr.Radio(["top-left", "top-right", "bottom-left", "bottom-right"],
+                                                     value="top-right", label="Posisi logo")
+                            logo_size = gr.Slider(5, 40, value=18, step=1, label="Ukuran logo (% lebar)")
+                            logo_opacity = gr.Slider(0.2, 1.0, value=0.85, step=0.05, label="Transparansi logo")
+                        with gr.Column():
+                            font_file = gr.File(label="Font caption (.ttf / .otf)", file_types=[".ttf", ".otf"],
+                                                type="filepath")
+                            font_clear = gr.Button("Pakai font bawaan", size="sm")
+                            colors_on = gr.Checkbox(label="Pakai warna brand untuk caption")
+                            with gr.Row():
+                                color_text = gr.ColorPicker(label="Teks")
+                                color_highlight = gr.ColorPicker(label="Kata diucapkan")
+                                color_keyword = gr.ColorPicker(label="Kata kunci")
+                        with gr.Column():
+                            music_file = gr.File(label="Musik latar (mp3 / wav)", file_types=[".mp3", ".wav", ".m4a"],
+                                                 type="filepath")
+                            music_clear = gr.Button("Hapus musik", size="sm")
+                            music_volume = gr.Slider(2, 50, value=15, step=1,
+                                                     label="Volume musik (%) · otomatis mengecil saat ada suara")
                 with gr.Row():
                     back_edit_btn = gr.Button("◀ Kembali edit")
                     to_render_btn = gr.Button("Lanjut: render →", variant="primary")
@@ -663,13 +726,13 @@ def build_ui():
 
         # ---------------------------------------------------------- wiring
         edit_in = [project, clips, edit_idx, caption_edits, style, max_len]
-        opt_in = [style, framing, loudnorm, cut_silence, cut_fillers, hook_on, keywords_on]
+        opt_in = [style, framing, loudnorm, cut_silence, cut_fillers, hook_on, keywords_on, use_brand]
         edit_out = [edit_idx, edit_header, title, hook_text, description, hashtags, sentences, sentence_table,
-                    clip_info, caption_table, edit_video]
+                    clip_info, caption_table, edit_video, framing_offset]
         wiring.update(
             open=[project, clips, caption_edits, edit_idx, renders, analyze_status, url, instructions, num_clips,
                   min_len, max_len, provider, model, language, style, framing, loudnorm, cut_silence, cut_fillers,
-                  hook_on, keywords_on, zip_file, tabs,
+                  hook_on, keywords_on, use_brand, zip_file, tabs,
                   job_dir, job_seen],
             edit_in=edit_in, edit_out=edit_out, style_clip=style_clip, opts=opt_in,
             render_info=render_info)
@@ -699,7 +762,7 @@ def build_ui():
                        [clips, pick_status])
         to_edit_btn.click(to_edit, clips, [edit_idx, tabs]).success(load_edit, edit_in, edit_out)
 
-        fields = [project, clips, edit_idx, title, hook_text, description, hashtags]
+        fields = [project, clips, edit_idx, title, hook_text, description, hashtags, framing_offset]
         for btn, delta in ((prev_btn, -1), (next_btn, 1)):
             btn.click(commit_fields, fields, clips).success(
                 partial(step_clip, delta), [clips, edit_idx], edit_idx).success(load_edit, edit_in, edit_out)
@@ -717,6 +780,18 @@ def build_ui():
         preview_in = [project, clips, style_clip, caption_edits] + opt_in
         for comp in [style_clip] + [c for c in opt_in if c is not loudnorm]:
             comp.change(style_preview, preview_in, style_image)
+        brand_controls = [logo_position, logo_size, logo_opacity, colors_on, color_text, color_highlight,
+                          color_keyword, music_volume]
+        demo.load(load_brand, None, brand_controls + [brand_info])
+        refresh_style = dict(fn=style_preview, inputs=preview_in, outputs=style_image)
+        for kind, comp, clear in (("logo", logo_file, logo_clear), ("font", font_file, font_clear),
+                                  ("music", music_file, music_clear)):
+            comp.upload(partial(brand_upload, kind), comp, [brand_info, comp]).success(**refresh_style)
+            clear.click(partial(brand_upload, kind, None), None, [brand_info, comp]).success(**refresh_style)
+        for comp in brand_controls:
+            event = comp.release if isinstance(comp, gr.Slider) else comp.input
+            event(brand_settings, brand_controls, brand_info).success(**refresh_style)
+        framing_offset.release(commit_fields, fields, clips)
         back_edit_btn.click(lambda: _go("edit"), None, tabs).success(load_edit, edit_in, edit_out)
         to_render_btn.click(lambda: _go("render"), None, tabs).success(
             render_summary, [clips] + opt_in, render_info)

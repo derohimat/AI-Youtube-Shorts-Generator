@@ -15,5 +15,8 @@ langchain-openai>=0.3.33
 pydantic>=2.11
 python-dotenv>=1.0.1
 
+# Brand kit: read the family name of uploaded fonts
+fonttools>=4.50
+
 # Web UI
 gradio>=6.0,<7
