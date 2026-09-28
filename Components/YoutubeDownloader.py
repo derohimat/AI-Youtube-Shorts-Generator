@@ -7,6 +7,8 @@ import os
 
 from Components import config
 
+BOT_CHECK = "not a bot"  # YouTube: "Sign in to confirm you're not a bot" (either apostrophe)
+
 
 def download_youtube_video(url, output_dir=None, max_height=None):
     """Download `url` into `output_dir` and return (video_path, title)."""
@@ -32,9 +34,19 @@ def _download_ytdlp(url, output_dir, max_height):
         "quiet": True,
         "no_warnings": True,
     }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
+    if config.YTDLP_COOKIES and os.path.isfile(config.YTDLP_COOKIES):
+        options["cookiefile"] = config.YTDLP_COOKIES
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+            path = ydl.prepare_filename(info)
+    except yt_dlp.utils.DownloadError as e:
+        if BOT_CHECK in str(e).lower() or "cookies" in str(e).lower():
+            raise RuntimeError(
+                "YouTube blocked the download from this server (\"confirm you're not a bot\"). Upload a "
+                "cookies.txt exported from your browser (see README), or download the video yourself and "
+                "upload the file.") from None
+        raise
     if not os.path.exists(path):
         matches = glob.glob(os.path.join(output_dir, f"{info['id']}.*"))
         path = next((m for m in matches if m.endswith(".mp4")), matches[0] if matches else path)

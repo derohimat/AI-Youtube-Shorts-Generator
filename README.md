@@ -82,6 +82,10 @@ Open **http://127.0.0.1:7860**. The page is a step-by-step wizard (in Indonesian
 | **5 · Gaya** | Caption style, framing and loudness for all clips, with a live preview. |
 | **6 · Render** | Renders the selected clips. Watch them, copy each title/description/hashtags, and download everything as a zip. **Edit klip lagi** goes back to change something and render again. |
 
+**Background processing.** Analysis and rendering run in the background, so you can close the page and come back later: the project card shows the progress (for example "⏳ Analisis 45%"). If the server restarts mid-job, the job is marked *terhenti* (interrupted); open the project and click **🔄 Coba lagi** to retry.
+
+**Before a long run**, open *Pengaturan lanjutan* and click **🔌 Tes koneksi AI**. It checks your API key, base URL (e.g. paas.id) and model name in a few seconds.
+
 Use `./run.sh --ui --share` to get a temporary public link, for example to use the tool from your phone.
 
 Uploaded videos are copied into `work/uploads/` so projects can be reopened after a restart. Projects created from the command line also appear in the project list.
@@ -158,6 +162,7 @@ app.py (web UI) / main.py (CLI)
 
 - **Transcription is slow**: use a GPU or a smaller `WHISPER_MODEL` (`base`). Run `python verify_cuda.py` to check GPU support.
 - **YouTube download fails**: update the downloader with `pip install -U yt-dlp`.
+- **"Sign in to confirm you're not a bot"** (common on Codespaces and other cloud servers): export your YouTube cookies with a browser extension such as "Get cookies.txt LOCALLY" while logged in to YouTube. Upload the file in *Pengaturan lanjutan → cookies.txt*, or set `YTDLP_COOKIES=/path/to/cookies.txt`. Treat this file like a password: it gives access to your YouTube account.
 - **"API key missing"**: check `.env`, or set `LLM_PROVIDER=heuristic` to try the tool without a key.
 - **Wrong person framed**: pick *Center crop* or *Split screen* in the UI, or change the time range.
 - **Run the tests**: `pip install pytest && python -m pytest tests`

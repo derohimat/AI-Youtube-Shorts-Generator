@@ -22,3 +22,7 @@ venv/
 work/
 output/
 .pytest_cache/
+
+# YouTube login cookies: never commit
+cookies.txt
+*cookies*.txt

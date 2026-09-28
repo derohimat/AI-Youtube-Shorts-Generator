@@ -201,6 +201,28 @@ def ask_llm(segments, num_clips, min_len, max_len, instructions="", provider=Non
     return candidates
 
 
+def test_connection(provider=None, model=None, timeout=30, llm=None):
+    """Send a tiny prompt to check key, base URL and model. Returns (ok, message)."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+    provider = (provider or config.LLM_PROVIDER).lower()
+    if provider == "heuristic":
+        return True, "Heuristic mode needs no AI connection."
+    model = model or config.LLM_MODEL or DEFAULT_MODELS.get(provider)
+    started = time.time()
+    try:
+        llm = llm or get_llm(provider, model)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reply = pool.submit(llm.invoke, [("user", "Reply with the single word: OK")]).result(timeout=timeout)
+    except FutureTimeout:
+        return False, f"No answer from {provider} / {model} within {timeout}s (check the base URL / network)."
+    except Exception as e:  # noqa: BLE001 - shown to the user
+        return False, f"{provider} / {model}: {type(e).__name__}: {str(e)[:300]}"
+    text = str(getattr(reply, "content", reply)).strip()[:60]
+    return True, f"{provider} / {model} answered \"{text}\" in {time.time() - started:.1f}s"
+
+
 def heuristic_candidates(segments, num_clips, min_len, max_len):
     """Offline fallback (no API key): pick dense, sentence-aligned windows."""
     target = (min_len + max_len) / 2

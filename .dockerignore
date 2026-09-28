@@ -40,3 +40,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Secrets
+cookies.txt
+*cookies*.txt
+work/

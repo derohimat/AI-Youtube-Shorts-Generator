@@ -155,7 +155,8 @@ def _save_session(project, clips, caption_edits, settings, render_results):
 
 
 def list_history():
-    """Projects that can be reopened without downloading, newest first."""
+    """Projects that can be reopened without downloading (plus ones still being analysed), newest first."""
+    from Components import jobs
     rows = []
     if not os.path.isdir(config.WORK_DIR):
         return rows
@@ -163,9 +164,16 @@ def list_history():
         if not _PROJECT_ID.match(name):
             continue
         work_dir = os.path.join(config.WORK_DIR, name)
+        job = jobs.read(work_dir)
         try:
             project = load_project(work_dir)
         except (OSError, ValueError):
+            if job:  # first analysis still running / failed: no project.json yet
+                source = job.get("params", {}).get("source", "")
+                rows.append({"id": name, "title": os.path.basename(source.rstrip("/")) or name, "source": source,
+                             "duration": 0, "n_clips": 0, "n_kept": 0, "n_renders": 0, "thumbnail": None,
+                             "updated_at": job.get("started_at") or job.get("queued_at") or "",
+                             "job": job, "ready": False})
             continue
         if not os.path.exists(project.get("video_path", "")):
             continue
@@ -180,6 +188,7 @@ def list_history():
                 "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(os.path.join(work_dir, "project.json")))),
             "n_kept": sum(1 for c in session["clips"] if c.get("keep")),
             "thumbnail": renders[-1]["thumbnail"] if renders else project_thumbnail(project),
+            "job": job, "ready": True,
         })
     rows.sort(key=lambda r: r["updated_at"], reverse=True)
     return rows
@@ -199,9 +208,14 @@ def open_project(project_id):
 
 def delete_project(project_id):
     """Delete a project's cached download, transcript and previews. Rendered shorts in output/ are kept."""
+    from Components import jobs
     work_dir = _project_path(project_id)
-    project = load_project(work_dir)
-    video = project.get("video_path", "")
+    if jobs.is_active(jobs.read(work_dir)):
+        raise RuntimeError("This project is still being processed; wait until the job finishes.")
+    try:
+        video = load_project(work_dir).get("video_path", "")
+    except (OSError, ValueError):  # analysis never finished
+        video = ""
     uploads = os.path.join(config.WORK_DIR, "uploads")
     if video and os.path.dirname(os.path.abspath(video)) == os.path.abspath(uploads) and os.path.exists(video):
         os.remove(video)  # our own copy of an uploaded file
@@ -385,6 +399,52 @@ def render_clip(project, clip, style=DEFAULT_PRESET, framing="auto", lines=None,
     progress(1.0, f"Clip {index}: done -> {video}")
     return {"video": video, "thumbnail": thumb, "metadata": base + ".txt", "text": text,
             "clip": clip, "framing": plan["mode"], "style": style}
+
+
+def analyze_project(source, num_clips=5, min_len=15, max_len=60, instructions="", provider=None, model=None,
+                    language=None, progress=None):
+    """Download + transcribe + find clips + prepare card previews; everything saved to the session."""
+    progress = progress or _noop
+    project = prepare(source, progress=lambda f, m: progress(f * 0.6, m), language=language or None)
+    clips = suggest_clips(project, int(num_clips), int(min_len), int(max_len), instructions, provider=provider,
+                          model=(model or "").strip() or None, progress=lambda f, m: progress(0.6 + f * 0.2, m))
+    if not clips:
+        raise ValueError("No suitable clips found. Try a shorter minimum length or different instructions.")
+    for i, clip in enumerate(sorted(clips, key=lambda c: c["score"], reverse=True)):
+        clip["keep"] = i < 3
+    for i, clip in enumerate(clips):
+        progress(0.8 + 0.2 * i / len(clips), f"Preparing preview {i + 1}/{len(clips)}")
+        preview_clip(project, clip)
+    save_session(project, clips=clips, caption_edits={}, settings=dict(
+        num_clips=num_clips, min_len=min_len, max_len=max_len, instructions=instructions,
+        provider=provider, model=model, language=language))
+    progress(1.0, f"Found {len(clips)} clips")
+    return project
+
+
+def render_project(project, style=DEFAULT_PRESET, framing="auto", loudnorm=True, progress=None):
+    """Render every kept clip of a project using its saved session (clips + caption edits)."""
+    from Components.captions import apply_text_edits
+    progress = progress or _noop
+    session = load_session(project)
+    kept = [c for c in session["clips"] if c.get("keep")]
+    if not kept:
+        raise ValueError("No clips selected.")
+    results = []
+    for n, clip in enumerate(kept, 1):
+        lines = caption_lines(project, clip, style)
+        edited = session["caption_edits"].get(str(clip["id"]))
+        if edited:
+            lines = apply_text_edits(lines, edited)
+        results.append(render_clip(project, clip, style=style, framing=framing, lines=lines, loudnorm=loudnorm,
+                                   index=n, progress=lambda f, m, n=n: progress((n - 1 + f) / len(kept), m)))
+    save_session(project, render_results=results, settings=dict(style=style, framing=framing, loudnorm=loudnorm))
+    return results
+
+
+def project_dir_for(source):
+    """(work_dir, project_id) a source will use, known before downloading."""
+    return _project_dir(source.strip().strip('"').strip("'"))
 
 
 def metadata_text(clip):

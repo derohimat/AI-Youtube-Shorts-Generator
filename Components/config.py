@@ -53,5 +53,9 @@ VIDEO_PRESET = _env("VIDEO_PRESET", "veryfast")
 USE_NVENC = _env_bool("USE_NVENC", False)
 MAX_DOWNLOAD_HEIGHT = int(_env("MAX_DOWNLOAD_HEIGHT", 1080))
 
+# Netscape cookies.txt for YouTube when it asks to "confirm you're not a bot" (common on cloud servers).
+# Default: work/cookies.txt (uploaded from the web UI), if present.
+YTDLP_COOKIES = _env("YTDLP_COOKIES", os.path.join(WORK_DIR, "cookies.txt"))
+
 FFMPEG = _env("FFMPEG_BINARY", shutil.which("ffmpeg") or "ffmpeg")
 FFPROBE = _env("FFPROBE_BINARY", shutil.which("ffprobe") or "ffprobe")

@@ -12,7 +12,7 @@ from functools import partial
 
 import gradio as gr
 
-from Components import config, pipeline
+from Components import config, jobs, pipeline
 from Components.captions import DEFAULT_PRESET, PRESETS, apply_text_edits
 from Components.framing import MODES
 from Components.highlights import DEFAULT_MODELS, MODEL_CHOICES, PROVIDERS, normalize_hashtags
@@ -113,6 +113,12 @@ def refresh_projects():
 
 
 def open_project(project_id):
+    """Load a project from its card. Projects whose first analysis is still running open on step 2."""
+    work_dir = os.path.join(config.WORK_DIR, project_id)
+    job = jobs.read(work_dir)
+    if not os.path.exists(os.path.join(work_dir, "project.json")):
+        keep = (gr.update(),) * 17  # outputs except analyze_status, tabs, job_dir, job_seen
+        return keep[:5] + (_job_text(job),) + keep[5:] + (_go("analyze"), work_dir, "")
     try:
         project, session = pipeline.open_project(project_id)
     except Exception as e:
@@ -125,6 +131,11 @@ def open_project(project_id):
     provider = st.get("provider") or config.LLM_PROVIDER
     status = (f"✅ **{project['title']}** dibuka dari daftar proyek ({len(clips)} klip, "
               f"{len(session['renders'])} di-render). Tidak perlu download ulang.")
+    step = _resume_step(session)
+    if job and job["status"] != "done":  # running, failed or interrupted: show it (with "Coba lagi")
+        step = "analyze" if job["kind"] == "analyze" else "render"
+        status = _job_text(job)
+    seen = job.get("finished_at") or "" if job else ""
     return (
         project, clips, session["caption_edits"], 0, session["renders"], status,
         project["source"], st.get("instructions", ""), st.get("num_clips", 5), st.get("min_len", 15),
@@ -132,7 +143,7 @@ def open_project(project_id):
         gr.update(choices=MODEL_CHOICES.get(provider, []), value=st.get("model") or DEFAULT_MODELS.get(provider)),
         st.get("language", ""), st.get("style", DEFAULT_PRESET), st.get("framing", "auto"),
         st.get("loudnorm", True), _zip(session["renders"]) if session["renders"] else None,
-        _go(_resume_step(session)),
+        _go(step), work_dir, seen,
     )
 
 
@@ -149,7 +160,7 @@ def delete_project(project_id, confirmed):
 
 
 def new_project():
-    return None, [], {}, 0, [], "Belum ada analisis.", "", None, "", None, _go("source")
+    return None, [], {}, 0, [], "Belum ada analisis.", "", None, "", None, _go("source"), None, ""
 
 
 # ---------------------------------------------------------------- 1-2. source & analysis
@@ -170,30 +181,90 @@ def check_source(url, upload, min_len, max_len):
     return _go("analyze"), "⏳ Memproses..."
 
 
-def analyze(url, upload, num_clips, min_len, max_len, instructions, provider, model, language,
-            progress=gr.Progress()):
-    source = (url or "").strip()
+def _bar(fraction, width=20):
+    filled = int(round(fraction * width))
+    return "▓" * filled + "░" * (width - filled)
+
+
+def _job_text(job):
+    if not job:
+        return "Belum ada proses."
+    text = jobs.describe(job)
+    if job["status"] in jobs.ACTIVE:
+        text += f"\n\n`{_bar(job.get('progress', 0))}`\n\nBoleh tutup halaman ini; lanjutkan nanti dari **0 · Proyek**."
+    return text
+
+
+def start_analyze(url, upload, num_clips, min_len, max_len, instructions, provider, model, language):
+    """Queue download + transcription + clip search in the background."""
+    source = pipeline.import_upload(upload) if upload else (url or "").strip()
+    work_dir, _ = pipeline.project_dir_for(source)
+    params = dict(source=source, num_clips=int(num_clips), min_len=int(min_len), max_len=int(max_len),
+                  instructions=instructions, provider=provider, model=model, language=language)
     try:
-        if upload:
-            source = pipeline.import_upload(upload)
-        project = pipeline.prepare(source, progress=_progress(progress), language=language or None)
-        clips = pipeline.suggest_clips(project, int(num_clips), int(min_len), int(max_len), instructions,
-                                       provider=provider, model=(model or "").strip() or None,
-                                       progress=_progress(progress))
-    except Exception as e:
-        raise _error(e)
-    if not clips:
-        raise gr.Error("Tidak ada klip yang cocok. Coba durasi minimum lebih pendek atau instruksi lain.")
-    for i, clip in enumerate(sorted(clips, key=lambda c: c["score"], reverse=True)):
-        clip["keep"] = i < 3
-    for i, clip in enumerate(clips):  # warm up the preview videos shown on the cards
-        progress((i + 1) / len(clips), desc=f"Menyiapkan preview klip {i + 1}/{len(clips)}")
-        pipeline.preview_clip(project, clip)
-    _save(project, clips, {}, num_clips=num_clips, min_len=min_len, max_len=max_len,
-          instructions=instructions, provider=provider, model=model, language=language)
-    status = (f"✅ **{project['title']}** ({pipeline.format_time(project['duration'])}, bahasa "
-              f"`{project['transcript']['language']}`): ditemukan **{len(clips)} klip**.")
-    return project, clips, {}, [], status, _go("pick")
+        job = jobs.submit(work_dir, "analyze", partial(pipeline.analyze_project, **params), params)
+    except RuntimeError as e:
+        raise gr.Error(f"Video ini sedang diproses: {e}")
+    return work_dir, "", _job_text(job)
+
+
+def retry_job(job_dir):
+    job = jobs.read(job_dir) if job_dir else None
+    if not job:
+        raise gr.Error("Tidak ada proses untuk diulang.")
+    if jobs.is_active(job):
+        raise gr.Error("Proses masih berjalan.")
+    params = job.get("params", {})
+    if job["kind"] == "analyze":
+        fn = partial(pipeline.analyze_project, **params)
+    else:
+        project = pipeline.load_project(job_dir)
+        project["work_dir"] = job_dir
+        fn = partial(pipeline.render_project, project, **params)
+    job = jobs.submit(job_dir, job["kind"], fn, params)
+    return "", _job_text(job), _job_text(job)
+
+
+def poll_job(job_dir, seen):
+    """Timer tick: show progress of the current project's job and load results when it finishes."""
+    nothing = (gr.update(),) * 9
+    job = jobs.read(job_dir) if job_dir else None
+    if not job:
+        return nothing
+    text = _job_text(job)
+    status_out = (text, gr.update()) if job["kind"] == "analyze" else (gr.update(), text)
+    if job["status"] != "done" or job.get("finished_at") == seen:
+        return (gr.update(),) * 7 + status_out
+    # finished just now: load the saved results into this page
+    project, session = pipeline.open_project(os.path.basename(job_dir))
+    if job["kind"] == "analyze":
+        done = (f"✅ **{project['title']}** ({pipeline.format_time(project['duration'])}, bahasa "
+                f"`{project['transcript']['language']}`): ditemukan **{len(session['clips'])} klip**.")
+        return (project, session["clips"], session["caption_edits"], session["renders"], gr.update(),
+                _go("pick"), job["finished_at"], done, gr.update())
+    renders = session["renders"]
+    return (project, gr.update(), gr.update(), renders, _zip(renders), gr.update(), job["finished_at"],
+            gr.update(), f"✅ {len(renders)} klip selesai di-render.")
+
+
+def save_cookies(path):
+    if not path:
+        return ""
+    os.makedirs(os.path.dirname(config.YTDLP_COOKIES) or ".", exist_ok=True)
+    import shutil
+    shutil.copy(path, config.YTDLP_COOKIES)
+    return "✅ cookies.txt disimpan; download YouTube berikutnya akan memakainya."
+
+
+def cookies_status():
+    return ("✅ cookies.txt terpasang." if os.path.isfile(config.YTDLP_COOKIES)
+            else "Belum ada cookies.txt (hanya perlu jika YouTube menolak download).")
+
+
+def check_ai(provider, model):
+    from Components.highlights import test_connection
+    ok, message = test_connection(provider, (model or "").strip() or None)
+    return ("✅ " if ok else "❌ ") + message
 
 
 # ---------------------------------------------------------------- 3. pick
@@ -360,24 +431,16 @@ def render_summary(clips, style, framing):
     return f"**{len(kept)} klip** akan di-render · caption: *{style_label}* · framing: *{framing_label}*\n\n{items}"
 
 
-def render_all(project, clips, caption_edits, style, framing, loudnorm, progress=gr.Progress()):
-    kept = _kept(clips)
-    if not project or not kept:
+def start_render(project, clips, caption_edits, style, framing, loudnorm):
+    if not project or not _kept(clips):
         raise gr.Error("Pilih minimal satu klip dulu.")
-    results = []
-    for n, clip in enumerate(kept, 1):
-        def report(fraction, message, n=n):
-            progress((n - 1 + fraction) / len(kept), desc=f"Klip {n}/{len(kept)}: {message}")
-        try:
-            results.append(pipeline.render_clip(project, clip, style=style, framing=framing,
-                                                lines=_lines(project, clip, style, caption_edits),
-                                                loudnorm=loudnorm, index=n, progress=report))
-        except Exception as e:
-            raise gr.Error(f"Klip {n} gagal: {type(e).__name__}: {e}")
-    session = pipeline.save_session(project, clips=clips, caption_edits=caption_edits, render_results=results,
-                                    settings=dict(style=style, framing=framing, loudnorm=loudnorm))
-    renders = session["renders"] if session else results
-    return renders, _zip(renders)
+    _save(project, clips, caption_edits, style=style, framing=framing, loudnorm=loudnorm)
+    params = dict(style=style, framing=framing, loudnorm=loudnorm)
+    try:
+        job = jobs.submit(project["work_dir"], "render", partial(pipeline.render_project, project, **params), params)
+    except RuntimeError as e:
+        raise gr.Error(f"Proyek ini sedang diproses: {e}")
+    return project["work_dir"], "", _job_text(job)
 
 
 # ---------------------------------------------------------------- layout
@@ -391,6 +454,8 @@ def build_ui():
         sentences = gr.State([])
         renders = gr.State([])
         projects = gr.State([])
+        job_dir = gr.State(None)      # work dir of the project whose job this page follows
+        job_seen = gr.State("")       # finished_at of the last job result already loaded
         wiring = {}  # event targets used by dynamically rendered cards
 
         gr.Markdown("# 🎬 AI Shorts Generator\nIkuti langkahnya dari kiri ke kanan. Semua tersimpan otomatis.")
@@ -420,8 +485,12 @@ def build_ui():
                                         status = f"✂️ {row.get('n_kept', 0)}/{row['n_clips']} klip dipilih"
                                     else:
                                         status = "🆕 belum dianalisis"
-                                    gr.Markdown(f"**{row['title']}**\n\n{pipeline.format_time(row['duration'])}"
-                                                f" · {status}\n\n<small>{row['updated_at']}</small>")
+                                    job = row.get("job")
+                                    if job and job["status"] != "done":
+                                        status = jobs.describe(job).split(" · ")[0]
+                                    length = f"{pipeline.format_time(row['duration'])} · " if row["duration"] else ""
+                                    gr.Markdown(f"**{row['title']}**\n\n{length}{status}"
+                                                f"\n\n<small>{row['updated_at']}</small>")
                                     btn = gr.Button("▶ Lanjutkan", variant="primary", size="sm")
                                     btn.click(partial(open_project, row["id"]), None, wiring["open"]).success(
                                         load_edit_if_any, wiring["edit_in"], wiring["edit_out"]).success(
@@ -457,6 +526,13 @@ def build_ui():
                                             value=config.LLM_MODEL or DEFAULT_MODELS.get(config.LLM_PROVIDER, ""),
                                             allow_custom_value=True, label="Model")
                         language = gr.Textbox(label="Kode bahasa (kosong = otomatis)", placeholder="id, en, ...")
+                    with gr.Row():
+                        ai_test_btn = gr.Button("🔌 Tes koneksi AI", size="sm", scale=1)
+                        ai_test_result = gr.Markdown(scale=3)
+                    with gr.Row():
+                        cookies_file = gr.File(label="cookies.txt YouTube (opsional)", file_types=[".txt"],
+                                               type="filepath", scale=1)
+                        cookies_info = gr.Markdown(scale=2)
                 analyze_btn = gr.Button("Analisis video →", variant="primary", size="lg")
 
             # ---------------- 2
@@ -464,6 +540,7 @@ def build_ui():
                 gr.Markdown("AI sedang: **download → transkripsi → mencari momen terbaik**. Video panjang bisa "
                             "butuh beberapa menit; hasilnya tersimpan di halaman Proyek.", elem_classes="step-hint")
                 analyze_status = gr.Markdown("Belum ada analisis. Mulai dari langkah **1 · Sumber**.")
+                retry_analyze_btn = gr.Button("🔄 Coba lagi", size="sm")
 
             # ---------------- 3
             with gr.Tab("3 · Pilih klip", id="pick"):
@@ -541,6 +618,8 @@ def build_ui():
             with gr.Tab("6 · Render", id="render"):
                 render_info = gr.Markdown()
                 render_btn = gr.Button("🎞️ Render semua klip yang dipilih", variant="primary", size="lg")
+                render_status = gr.Markdown()
+                retry_render_btn = gr.Button("🔄 Coba lagi", size="sm")
                 zip_file = gr.File(label="Download semua (zip)")
 
                 @gr.render(inputs=renders)
@@ -566,7 +645,8 @@ def build_ui():
                     clip_info, caption_table, edit_video]
         wiring.update(
             open=[project, clips, caption_edits, edit_idx, renders, analyze_status, url, instructions, num_clips,
-                  min_len, max_len, provider, model, language, style, framing, loudnorm, zip_file, tabs],
+                  min_len, max_len, provider, model, language, style, framing, loudnorm, zip_file, tabs,
+                  job_dir, job_seen],
             edit_in=edit_in, edit_out=edit_out, style_clip=style_clip, style=style, framing=framing,
             render_info=render_info)
 
@@ -575,13 +655,21 @@ def build_ui():
         tab_projects.select(refresh_projects, None, refresh)
         delete_btn.click(delete_project, [delete_choice, delete_confirm], refresh + [delete_confirm])
         new_btn.click(new_project, None, [project, clips, caption_edits, edit_idx, renders, analyze_status,
-                                          url, upload, instructions, zip_file, tabs])
+                                          url, upload, instructions, zip_file, tabs, job_dir, job_seen])
 
         target.change(apply_target, target, [min_len, max_len, num_clips])
         provider.input(models_for, provider, model)
         analyze_btn.click(check_source, [url, upload, min_len, max_len], [tabs, analyze_status]).success(
-            analyze, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language],
-            [project, clips, caption_edits, renders, analyze_status, tabs])
+            start_analyze, [url, upload, num_clips, min_len, max_len, instructions, provider, model, language],
+            [job_dir, job_seen, analyze_status])
+        retry_analyze_btn.click(retry_job, job_dir, [job_seen, analyze_status, render_status])
+        ai_test_btn.click(check_ai, [provider, model], ai_test_result)
+        cookies_file.upload(save_cookies, cookies_file, cookies_info)
+        demo.load(cookies_status, None, cookies_info)
+        timer = gr.Timer(2.0)
+        timer.tick(poll_job, [job_dir, job_seen],
+                   [project, clips, caption_edits, renders, zip_file, tabs, job_seen, analyze_status, render_status],
+                   show_progress="hidden")
 
         more_btn.click(more_clips, [project, clips, num_clips, min_len, max_len, instructions, provider, model],
                        [clips, pick_status])
@@ -609,7 +697,9 @@ def build_ui():
         to_render_btn.click(lambda: _go("render"), None, tabs).success(
             render_summary, [clips, style, framing], render_info)
 
-        render_btn.click(render_all, [project, clips, caption_edits, style, framing, loudnorm], [renders, zip_file])
+        render_btn.click(start_render, [project, clips, caption_edits, style, framing, loudnorm],
+                         [job_dir, job_seen, render_status])
+        retry_render_btn.click(retry_job, job_dir, [job_seen, analyze_status, render_status])
         back_edit2_btn.click(lambda: _go("edit"), None, tabs).success(load_edit, edit_in, edit_out)
         home_btn.click(lambda: refresh_projects() + (_go("projects"),), None, refresh + [tabs])
     return demo
@@ -622,6 +712,9 @@ def main():
     parser.add_argument("--share", action="store_true", help="create a temporary public link")
     args = parser.parse_args()
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    interrupted = jobs.recover()
+    if interrupted:
+        print(f"{interrupted} unfinished job(s) from a previous run marked as interrupted")
     build_ui().queue().launch(server_name=args.host, server_port=args.port, share=args.share, css=CSS,
                               allowed_paths=[config.OUTPUT_DIR, config.WORK_DIR])
 
